@@ -63,6 +63,8 @@ async function main(): Promise<void> {
     await cp(join(ROOT, 'web', file), join(OUT, file));
   }
   await cp(join(ROOT, 'web', 'icons'), join(OUT, 'icons'), { recursive: true });
+  // This is an application artifact, not a Jekyll documentation site.
+  await writeFile(join(OUT, '.nojekyll'), '');
 
   const generated = (await walk(OUT))
     .map((file) => relative(OUT, file).split(sep).join('/'))
