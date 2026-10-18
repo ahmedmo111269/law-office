@@ -3,15 +3,26 @@ name: Deploy PWA to GitHub Pages
 # The app is a static bundle in `dist/`. `dist/` is intentionally NOT committed:
 # it is rebuilt from source on every deploy, so the published site can never
 # drift from the code and no database/backup file can leak into the repository.
+#
+# This repository's Pages site is still configured with the legacy "deploy from
+# a branch" source, so GitHub also publishes a Jekyll build of the repository
+# root on every push. That build shows the README instead of the app. Until the
+# owner switches Settings → Pages → Source to "GitHub Actions" (the API token
+# used here cannot change it), we redeploy the artifact *after* the legacy build
+# finishes so the application is the last deployment that wins.
 on:
   push:
     branches: [main]
+  workflow_run:
+    workflows: ['pages build and deployment']
+    types: [completed]
   workflow_dispatch:
 
 permissions:
   contents: read
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
