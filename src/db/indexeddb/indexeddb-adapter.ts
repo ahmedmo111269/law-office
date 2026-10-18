@@ -14,6 +14,15 @@ import { AppError } from '../../errors.ts';
 import { PORTABLE_SCHEMA } from '../../schema/v1/portable-schema.ts';
 import type { PortableSchema, PortableTable } from '../../schema/portable-types.ts';
 import { compileCheck, type CompiledCheck, type Row } from '../../portable/expression.ts';
+import {
+  compareRows,
+  indexRangeFilter,
+  matchesFilters,
+  normalizeQuery,
+  orderIndex,
+  type QueryOptions,
+  type QueryPage,
+} from '../../portable/query.ts';
 
 export const IDB_APPLICATION_ID = 0x4c41574f;
 export const IDB_SCHEMA_VERSION = 1;
@@ -110,7 +119,9 @@ export class IndexedDbDatabase {
           if (store.indexNames.contains(index.name)) continue;
           // SQLite partial unique indexes cannot be expressed by IndexedDB;
           // they are enforced by the portable constraint engine instead.
-          store.createIndex(index.name, [...index.columns], {
+          // A one-element array keyPath would create a compound key in
+          // IndexedDB, so single-column indexes must use the bare column name.
+          store.createIndex(index.name, index.columns.length === 1 ? index.columns[0]! : [...index.columns], {
             unique: index.unique && index.where === null,
           });
         }
@@ -177,7 +188,10 @@ export class IndexedDbDatabase {
     if (!store.indexNames.contains(indexName)) {
       throw new AppError('VALIDATION_FAILED', `unknown index ${indexName} on ${table}`);
     }
-    return (await request(store.index(indexName).getAll(value))) as IdbRow[];
+    const index = store.index(indexName);
+    // Databases created before this fix may have a one-element array keyPath.
+    const key = Array.isArray(index.keyPath) && index.keyPath.length === 1 ? [value] : value;
+    return (await request(index.getAll(key))) as IdbRow[];
   }
 
   async getByColumns(
@@ -193,6 +207,85 @@ export class IndexedDbDatabase {
     this.assertOpen();
     const store = this.db.transaction(table, 'readonly').objectStore(table);
     return request(store.count());
+  }
+
+  /**
+   * Streams an IndexedDB cursor and only materialises the requested page.
+   *
+   * An indexed cursor is used when the requested order maps to an index and the
+   * column is NOT NULL (IndexedDB indexes omit null keys, so a nullable sort
+   * column would silently lose rows). Otherwise rows matching the filters are
+   * collected and sorted in JavaScript. The total is always the exact match
+   * count, so the UI can paginate without guessing.
+   */
+  async queryRows(tableName: string, options: QueryOptions = {}): Promise<QueryPage> {
+    this.assertOpen();
+    const table = this.schema.tables.find((candidate) => candidate.name === tableName);
+    if (!table) throw new AppError('VALIDATION_FAILED', `unknown table ${tableName}`);
+    const query = normalizeQuery(table, options);
+    const tx = this.db.transaction(tableName, 'readonly');
+    const store = tx.objectStore(tableName);
+    const order = query.orderBy.length === 1 ? orderIndex(table, query.orderBy) : null;
+    const rangeHit = indexRangeFilter(table, query.filters);
+    const canStream = order !== null && (rangeHit === null || rangeHit.indexName === order.indexName);
+    const direction: IDBCursorDirection = query.orderBy[0]?.direction === 'desc' ? 'prev' : 'next';
+
+    if (canStream && order) {
+      const source = store.index(order.indexName);
+      const range =
+        rangeHit && rangeHit.value !== null
+          ? IDBKeyRange.only(indexKey(source, rangeHit.value))
+          : null;
+      const total = await new Promise<{ rows: IdbRow[]; total: number }>((resolve, reject) => {
+        const rows: IdbRow[] = [];
+        let matched = 0;
+        const request$ = range ? source.openCursor(range, direction) : source.openCursor(null, direction);
+        request$.onerror = () => reject(request$.error ?? new Error('IndexedDB cursor failed'));
+        request$.onsuccess = () => {
+          const cursor = request$.result;
+          if (!cursor) {
+            resolve({ rows, total: matched });
+            return;
+          }
+          const row = cursor.value as IdbRow;
+          if (matchesFilters(row, query.filters)) {
+            matched += 1;
+            if (matched > query.offset && rows.length < query.limit) rows.push(row);
+          }
+          cursor.continue();
+        };
+      });
+      return total;
+    }
+
+    const collected = await new Promise<IdbRow[]>((resolve, reject) => {
+      const rows: IdbRow[] = [];
+      const source =
+        rangeHit !== null
+          ? store.index(rangeHit.indexName)
+          : store;
+      const range =
+        rangeHit && rangeHit.value !== null
+          ? IDBKeyRange.only(indexKey(source, rangeHit.value))
+          : null;
+      const request$ = range ? source.openCursor(range, 'next') : source.openCursor(null, 'next');
+      request$.onerror = () => reject(request$.error ?? new Error('IndexedDB cursor failed'));
+      request$.onsuccess = () => {
+        const cursor = request$.result;
+        if (!cursor) {
+          resolve(rows);
+          return;
+        }
+        const row = cursor.value as IdbRow;
+        if (matchesFilters(row, query.filters)) rows.push(row);
+        cursor.continue();
+      };
+    });
+    if (query.orderBy.length > 0) collected.sort((a, b) => compareRows(a, b, query.orderBy));
+    return {
+      rows: collected.slice(query.offset, query.offset + query.limit),
+      total: collected.length,
+    };
   }
 
   /**
@@ -488,6 +581,10 @@ async function rowsByColumns(
   }
   const rows = (await request(store.getAll())) as IdbRow[];
   return rows.filter((row) => entries.every(([column, value]) => row[column] === value));
+}
+
+function indexKey(source: { keyPath: string | string[] | null }, value: IDBValidKey): IDBValidKey {
+  return Array.isArray(source.keyPath) && source.keyPath.length === 1 ? [value] : value;
 }
 
 function classifyIdbError(error: unknown): AppError {

@@ -15,6 +15,7 @@ import { AppError } from '../errors.ts';
 import { PORTABLE_SCHEMA } from '../schema/v1/portable-schema.ts';
 import { primaryKeyOf, type PortableSchema, type PortableTable } from '../schema/portable-types.ts';
 import type { Row } from './expression.ts';
+import { normalizeQuery, type QueryOptions, type QueryPage } from './query.ts';
 
 export type EngineRow = Record<string, string | number | null>;
 
@@ -33,6 +34,8 @@ export interface PortableTransaction {
 export interface PortableStore extends PortableTransaction {
   readonly engine: 'sqlite' | 'indexeddb';
   readonly schema: PortableSchema;
+  /** Paged/filtered read that never materialises more rows than the page. */
+  query(table: string, options?: QueryOptions): Promise<QueryPage>;
   transaction<T>(tables: readonly string[], fn: (tx: PortableTransaction) => Promise<T>): Promise<T>;
   exportAll(): Promise<Record<string, EngineRow[]>>;
   importAll(data: Record<string, EngineRow[]>): Promise<void>;
@@ -119,6 +122,24 @@ export class SqlitePortableStore implements PortableStore {
   async count(table: string): Promise<number> {
     tableDef(this.schema, table);
     return this.db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM ${identifier(table)}`)?.c ?? 0;
+  }
+
+  async query(table: string, options: QueryOptions = {}): Promise<QueryPage> {
+    const def = tableDef(this.schema, table);
+    const query = normalizeQuery(def, options);
+    const where = buildWhere(query.filters);
+    const order = buildOrder(query.orderBy);
+    const total =
+      this.db.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM ${identifier(table)}${where.sql}`,
+        where.params,
+      )?.c ?? 0;
+    if (query.limit === 0) return { rows: [], total };
+    const rows = this.db.query<EngineRow>(
+      `SELECT * FROM ${identifier(table)}${where.sql}${order} LIMIT ? OFFSET ?`,
+      [...where.params, query.limit, query.offset],
+    );
+    return { rows, total };
   }
 
   async put(table: string, row: EngineRow): Promise<void> {
@@ -292,6 +313,10 @@ export class IndexedDbStore implements PortableStore {
     return this.db.count(table);
   }
 
+  query(table: string, options: QueryOptions = {}): Promise<QueryPage> {
+    return this.db.queryRows(table, options);
+  }
+
   put(table: string, row: EngineRow): Promise<void> {
     return this.db.put(table, row);
   }
@@ -364,6 +389,83 @@ export class IndexedDbStore implements PortableStore {
   integrityCheck(): Promise<{ ok: boolean; errors: string[]; tables: number; indexes: number }> {
     return this.db.integrityCheck();
   }
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`);
+}
+
+function buildWhere(filters: readonly import('./query.ts').QueryFilter[]): {
+  sql: string;
+  params: Array<string | number>;
+} {
+  if (filters.length === 0) return { sql: '', params: [] };
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+  for (const filter of filters) {
+    const column = identifier(filter.column);
+    switch (filter.op) {
+      case 'isNull':
+        clauses.push(`${column} IS NULL`);
+        break;
+      case 'notNull':
+        clauses.push(`${column} IS NOT NULL`);
+        break;
+      case 'eq':
+        if (filter.value === null) clauses.push(`${column} IS NULL`);
+        else {
+          clauses.push(`${column} = ?`);
+          params.push(filter.value as string | number);
+        }
+        break;
+      case 'neq':
+        if (filter.value === null) clauses.push(`${column} IS NOT NULL`);
+        else {
+          clauses.push(`${column} <> ?`);
+          params.push(filter.value as string | number);
+        }
+        break;
+      case 'in': {
+        const values = filter.value as readonly (string | number)[];
+        if (values.length === 0) clauses.push('1 = 0');
+        else {
+          clauses.push(`${column} IN (${placeholders(values.length)})`);
+          params.push(...values);
+        }
+        break;
+      }
+      case 'gt':
+      case 'gte':
+      case 'lt':
+      case 'lte': {
+        const operator = filter.op === 'gt' ? '>' : filter.op === 'gte' ? '>=' : filter.op === 'lt' ? '<' : '<=';
+        clauses.push(`${column} ${operator} ?`);
+        params.push(filter.value as string | number);
+        break;
+      }
+      case 'contains':
+        clauses.push(`instr(lower(CAST(${column} AS TEXT)), lower(?)) > 0`);
+        params.push(String(filter.value));
+        break;
+      case 'startsWith':
+        clauses.push(`${column} LIKE ? ESCAPE '\\'`);
+        params.push(`${escapeLike(String(filter.value))}%`);
+        break;
+      default:
+        throw new AppError('VALIDATION_FAILED', `unsupported filter ${String(filter.op)}`);
+    }
+  }
+  return { sql: ` WHERE ${clauses.join(' AND ')}`, params };
+}
+
+function buildOrder(orderBy: readonly import('./query.ts').QueryOrder[]): string {
+  if (orderBy.length === 0) return '';
+  const parts = orderBy.map((order) => {
+    const column = identifier(order.column);
+    const direction = order.direction === 'desc' ? 'DESC' : 'ASC';
+    return `CASE WHEN ${column} IS NULL THEN 1 ELSE 0 END ASC, ${column} ${direction}`;
+  });
+  return ` ORDER BY ${parts.join(', ')}`;
 }
 
 /** Parents before children, using the declared foreign keys (self references ignored). */
