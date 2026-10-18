@@ -1,0 +1,40 @@
+{
+  "name": "law-office",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Law office management — offline-first local data foundation (SQLite + IndexedDB)",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
+    "build": "tsc",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.ts",
+    "test:verbose": "node --disable-warning=ExperimentalWarning --test --test-reporter=spec test/*.test.ts",
+    "test:idb": "node --disable-warning=ExperimentalWarning --test test/indexeddb.test.ts test/engine-parity.test.ts",
+    "test:browser": "node --disable-warning=ExperimentalWarning scripts/browser-selftest.ts",
+    "db:init": "node --disable-warning=ExperimentalWarning src/cli.ts init",
+    "db:check": "node --disable-warning=ExperimentalWarning src/cli.ts check",
+    "db:info": "node --disable-warning=ExperimentalWarning src/cli.ts info",
+    "db:backup": "node --disable-warning=ExperimentalWarning src/cli.ts backup",
+    "db:verify": "node --disable-warning=ExperimentalWarning src/cli.ts verify",
+    "db:backups": "node --disable-warning=ExperimentalWarning src/cli.ts backups",
+    "db:restore": "node --disable-warning=ExperimentalWarning src/cli.ts restore",
+    "db:search": "node --disable-warning=ExperimentalWarning src/cli.ts search",
+    "db:reindex": "node --disable-warning=ExperimentalWarning src/cli.ts reindex",
+    "db:migrate": "node --disable-warning=ExperimentalWarning src/cli.ts migrate",
+    "db:bench": "node --disable-warning=ExperimentalWarning scripts/benchmark.ts",
+    "db:gen-manifest": "node --disable-warning=ExperimentalWarning scripts/gen-manifest.ts",
+    "db:gen-schema": "node --disable-warning=ExperimentalWarning scripts/gen-schema-doc.ts",
+    "db:gen-portable": "node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts && node --disable-warning=ExperimentalWarning scripts/gen-portable-seed.ts"
+  },
+  "devDependencies": {
+    "@sparticuz/chromium": "^153.0.0",
+    "@types/node": "^22.18.8",
+    "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.6",
+    "typescript": "^5.9.3"
+  }
+}
