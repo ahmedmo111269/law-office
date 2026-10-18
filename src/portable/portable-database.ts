@@ -22,6 +22,7 @@ import { newId } from '../util/uuid.ts';
 import { stableStringify } from '../util/stable.ts';
 import { AppError, ConflictError, NotFoundError, ValidationError } from '../errors.ts';
 import type { PortableIndex, PortableTable } from '../schema/portable-types.ts';
+import { applyQuery, type QueryOptions, type QueryPage } from './query.ts';
 
 const SCHEMA = PORTABLE_SCHEMA;
 import { compileCheck, type CompiledCheck, type Row } from './expression.ts';
@@ -56,6 +57,15 @@ export interface PortableOptions {
   readonly deviceLabel?: string;
   readonly timezone?: string;
   readonly schema?: typeof PORTABLE_SCHEMA;
+}
+
+export interface SearchHit {
+  readonly entityType: string;
+  readonly entityId: string;
+  readonly title: string;
+  readonly subtitle: string | null;
+  readonly snippet: string;
+  readonly rank: number;
 }
 
 export interface PortableBackup {
@@ -328,6 +338,121 @@ export class PortableLawOffice {
         (row.deleted_at === null || row.deleted_at === undefined) &&
         (!where || Object.entries(where).every(([column, value]) => (row[column] ?? null) === value)),
     ).length;
+  }
+
+  /**
+   * Paged, filtered and ordered read over the approved store contract.
+   * `total` is the exact number of matching rows (before the page slice), so
+   * the UI can show real pagination without loading every record into memory.
+   */
+  async query(
+    entityCode: string,
+    options: QueryOptions & { includeDeleted?: boolean } = {},
+  ): Promise<QueryPage> {
+    const { definition, table } = this.tableFor(entityCode);
+    const filters = [...(options.filters ?? [])];
+    if (!options.includeDeleted && table.columns.some((column) => column.name === 'deleted_at')) {
+      filters.push({ column: 'deleted_at', op: 'isNull' });
+    }
+    const queryOptions: QueryOptions = {
+      filters,
+      ...(options.orderBy ? { orderBy: options.orderBy } : {}),
+      offset: options.offset ?? 0,
+      limit: options.limit ?? 50,
+    };
+    if (this.activeTx) {
+      return applyQuery(
+        await this.activeTx.getAll(definition.table),
+        {
+          filters: queryOptions.filters ?? [],
+          orderBy: queryOptions.orderBy ?? [],
+          offset: queryOptions.offset ?? 0,
+          limit: queryOptions.limit ?? 50,
+        },
+      );
+    }
+    return this.store.query(definition.table, queryOptions);
+  }
+
+  /** Soft-deleted rows, newest first; used by the archive/restore screen. */
+  async listDeleted(
+    entityCode: string,
+    options: Omit<QueryOptions, 'filters'> & { filters?: QueryOptions['filters'] } = {},
+  ): Promise<QueryPage> {
+    return this.query(entityCode, {
+      ...options,
+      includeDeleted: true,
+      filters: [
+        ...(options.filters ?? []),
+        { column: 'deleted_at', op: 'notNull' },
+      ],
+      orderBy: options.orderBy ?? [{ column: 'updated_at', direction: 'desc' }],
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Audit and per-device preferences
+  // ---------------------------------------------------------------------
+
+  async recentAudit(limit = 25): Promise<EngineRow[]> {
+    const pageSize = Math.max(1, Math.min(200, Math.trunc(limit)));
+    const options: QueryOptions = {
+      orderBy: [{ column: 'occurred_at', direction: 'desc' }],
+      limit: pageSize,
+    };
+    if (this.activeTx) {
+      const rows = await this.activeTx.getAll('audit_log');
+      return rows
+        .sort((left, right) => String(right.occurred_at).localeCompare(String(left.occurred_at)))
+        .slice(0, pageSize);
+    }
+    return (await this.store.query('audit_log', options)).rows;
+  }
+
+  async auditTrail(entityType: string, entityId: string, limit = 50): Promise<EngineRow[]> {
+    const pageSize = Math.max(1, Math.min(200, Math.trunc(limit)));
+    const rows = this.activeTx
+      ? (await this.activeTx.getByColumns('audit_log', { entity_type: entityType, entity_id: entityId }))
+      : await this.store.getByColumns('audit_log', { entity_type: entityType, entity_id: entityId });
+    return rows
+      .sort((left, right) => String(right.occurred_at).localeCompare(String(left.occurred_at)))
+      .slice(0, pageSize);
+  }
+
+  async getDeviceSetting(key: string): Promise<string | null> {
+    assertSettingKey(key);
+    const row = await this.conn.get('device_setting', [this.deviceId, key]);
+    return row && typeof row.value === 'string' ? row.value : null;
+  }
+
+  async setDeviceSetting(
+    key: string,
+    value: string | number | boolean,
+    valueType: 'string' | 'number' | 'boolean' | 'json' = 'string',
+  ): Promise<void> {
+    assertSettingKey(key);
+    const normalized = normalizeSettingValue(value, valueType);
+    await this.transaction(async (tx) => {
+      await tx.put('device_setting', {
+        device_id: this.deviceId,
+        key,
+        value: normalized,
+        value_type: valueType,
+        updated_at: this.now(),
+      });
+    }, ['device_setting']);
+  }
+
+  async listDeviceSettings(): Promise<EngineRow[]> {
+    const rows = await this.conn.getByColumns('device_setting', { device_id: this.deviceId });
+    return rows.sort((left, right) => String(left.key).localeCompare(String(right.key)));
+  }
+
+  async removeDeviceSetting(key: string): Promise<void> {
+    assertSettingKey(key);
+    await this.transaction(async (tx) => {
+      await tx.delete('device_setting', [this.deviceId, key]);
+    }, ['device_setting']);
   }
 
   async insert(entityCode: string, values: Record<string, unknown>, options: { id?: string } = {}): Promise<EngineRow> {
@@ -979,10 +1104,18 @@ export class PortableLawOffice {
   async search(
     query: string,
     options: { entityType?: string; limit?: number; offset?: number } = {},
-  ): Promise<Array<{ entityType: string; entityId: string; title: string; subtitle: string | null; snippet: string; rank: number }>> {
+  ): Promise<SearchHit[]> {
+    return (await this.searchPage(query, options)).hits;
+  }
+
+  /** Search with the exact match count, so result lists can paginate honestly. */
+  async searchPage(
+    query: string,
+    options: { entityType?: string; limit?: number; offset?: number } = {},
+  ): Promise<{ hits: SearchHit[]; total: number }> {
     const normalized = normalizeArabic(query);
     const tokens = [...new Set(normalized.split(/\s+/).filter(Boolean))].slice(0, 20);
-    if (tokens.length === 0) return [];
+    if (tokens.length === 0) return { hits: [], total: 0 };
     let docs = await this.conn.getAll('search_document');
     if (options.entityType) docs = docs.filter((doc) => doc.entity_type === options.entityType);
     const hits = docs
@@ -1003,7 +1136,10 @@ export class PortableLawOffice {
       .sort((left, right) => left.rank - right.rank || left.title.localeCompare(right.title));
     const offset = Math.max(0, Math.trunc(options.offset ?? 0));
     const limit = Math.max(1, Math.min(200, Math.trunc(options.limit ?? 20)));
-    return hits.slice(offset, offset + limit).map((hit, index) => ({ ...hit, rank: index }));
+    return {
+      hits: hits.slice(offset, offset + limit).map((hit, index) => ({ ...hit, rank: index })),
+      total: hits.length,
+    };
   }
 
   async rebuildSearch(): Promise<{ documents: number }> {
@@ -1080,6 +1216,71 @@ export class PortableLawOffice {
       }
       await this.refreshPartySearch(tx, String(party.id));
       return (await this.getPartyFull(String(party.id)))! as unknown as Record<string, unknown>;
+    });
+  }
+
+  async createOrganization(input: {
+    legalName: string;
+    tradeName?: string;
+    legalFormCode?: string;
+    commercialRegistryNo?: string;
+    taxId?: string;
+    establishedOn?: string;
+    registryOffice?: string;
+    notes?: string;
+  }, options: { client?: boolean } = {}): Promise<Record<string, unknown>> {
+    if (!input.legalName?.trim()) throw new ValidationError('legal name is required');
+    const displayName = input.tradeName?.trim() || input.legalName.trim();
+    return this.transaction(async (tx) => {
+      const party = await this.insert('party', {
+        kind: 'organization',
+        display_name: displayName,
+        status_id: await this.lookupId('party_status', 'active'),
+        notes: input.notes ?? null,
+      });
+      await this.insert(
+        'organization',
+        {
+          legal_name: input.legalName.trim(),
+          trade_name: input.tradeName?.trim() || null,
+          legal_form_id: input.legalFormCode
+            ? await this.lookupId('legal_form', input.legalFormCode)
+            : null,
+          commercial_registry_no: input.commercialRegistryNo?.trim() || null,
+          tax_id: input.taxId?.trim() || null,
+          established_on: input.establishedOn ?? null,
+          registry_office: input.registryOffice?.trim() || null,
+          notes: input.notes ?? null,
+        },
+        { id: String(party.id) },
+      );
+      if (options.client ?? true) {
+        await this.ensureClientProfile(String(party.id));
+      }
+      await this.refreshPartySearch(tx, String(party.id));
+      return (await this.getPartyFull(String(party.id)))! as unknown as Record<string, unknown>;
+    });
+  }
+
+  /** Adds a client profile to an existing party without duplicating the party. */
+  async ensureClientProfile(partyId: string): Promise<EngineRow> {
+    await this.require('party', partyId);
+    const existing = await this.conn.get('client_profile', partyId);
+    if (existing) return existing;
+    return this.transaction(async () => {
+      const clientCode = (await this.nextNumber('client.code')).formatted;
+      return this.insert(
+        'client_profile',
+        {
+          client_code: clientCode,
+          client_since: this.now().slice(0, 10),
+          status_id: await this.lookupId('client_status', 'active'),
+          source_id: null,
+          notes: null,
+          archived_at: null,
+        },
+        { id: partyId },
+      );
     });
   }
 
@@ -2019,3 +2220,41 @@ async function checksumTables(tables: Record<string, EngineRow[]>): Promise<stri
   return `fnv1a-${hash.toString(16).padStart(8, '0')}`;
 }
 
+
+
+const SETTING_KEY_RE = /^[a-z][a-zA-Z0-9_.-]{0,100}$/;
+
+function assertSettingKey(key: string): void {
+  if (!SETTING_KEY_RE.test(key)) {
+    throw new ValidationError('invalid device setting key', { key });
+  }
+}
+
+function normalizeSettingValue(
+  value: string | number | boolean,
+  type: 'string' | 'number' | 'boolean' | 'json',
+): string {
+  switch (type) {
+    case 'number': {
+      const parsed = typeof value === 'number' ? value : Number(value);
+      if (!Number.isFinite(parsed)) throw new ValidationError('device setting must be a number');
+      return String(parsed);
+    }
+    case 'boolean':
+      return value === true || String(value).toLowerCase() === 'true' || String(value) === '1'
+        ? 'true'
+        : 'false';
+    case 'json': {
+      const text = typeof value === 'string' ? value : JSON.stringify(value);
+      try {
+        JSON.parse(text);
+      } catch {
+        throw new ValidationError('device setting must be valid JSON');
+      }
+      return text;
+    }
+    case 'string':
+    default:
+      return String(value);
+  }
+}

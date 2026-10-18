@@ -28,9 +28,15 @@
     "db:bench": "node --disable-warning=ExperimentalWarning scripts/benchmark.ts",
     "db:gen-manifest": "node --disable-warning=ExperimentalWarning scripts/gen-manifest.ts",
     "db:gen-schema": "node --disable-warning=ExperimentalWarning scripts/gen-schema-doc.ts",
-    "db:gen-portable": "node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts && node --disable-warning=ExperimentalWarning scripts/gen-portable-seed.ts"
+    "db:gen-portable": "node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts && node --disable-warning=ExperimentalWarning scripts/gen-portable-seed.ts",
+    "build:web": "node --disable-warning=ExperimentalWarning scripts/build-web.ts",
+    "serve:web": "node --disable-warning=ExperimentalWarning scripts/serve-web.ts",
+    "test:ui": "node --disable-warning=ExperimentalWarning scripts/ui-e2e.ts",
+    "test:smoke": "node --disable-warning=ExperimentalWarning scripts/ui-smoke.ts"
   },
   "devDependencies": {
+    "@fontsource/amiri": "^5.3.0",
+    "@fontsource/ibm-plex-sans-arabic": "^5.3.0",
     "@sparticuz/chromium": "^153.0.0",
     "@types/node": "^22.18.8",
     "esbuild": "^0.28.2",

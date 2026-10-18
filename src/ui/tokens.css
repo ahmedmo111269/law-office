@@ -1,0 +1,284 @@
+/* =========================================================================
+   LexDesk — Design tokens (single source of truth)
+   -----------------------------------------------------------------------
+   Naming
+     --c-*      raw colour palette, never used directly by components
+     --surface* --surface* surfaces           --text*     foreground inks
+     --border*  hairlines                     --primary* brand / action
+     --danger*  destructive / overdue         --success* done / paid
+     --warning* attention                     --info*    neutral information
+     --accent*  brass highlight (brand accent)
+     --sp-* 4-based spacing scale             --r-*      radii
+     --shadow-* elevation                     --dur-* / --ease motion
+     --fs-* type scale                        --control-h / --row-h sizing
+   Themes: :root = light "parchment & ink"; [data-theme='dark'] = night;
+   [data-density='compact'|'comfortable'] changes row height only.
+   ========================================================================= */
+
+:root {
+  color-scheme: light;
+
+  /* ---- palette (verified ≥ 4.5:1 on their intended backgrounds) ---- */
+  --c-ink-900: #0c1714;
+  --c-ink-800: #10201c;
+  --c-ink-700: #24332e;
+  --c-ink-600: #3d4b46;
+  --c-ink-500: #5c6a64;
+  --c-ink-400: #7d8a84;
+  --c-parchment-50: #fbf9f4;
+  --c-parchment-100: #f5f3ee;
+  --c-parchment-200: #ece8df;
+  --c-parchment-300: #ddd7ca;
+  --c-parchment-400: #c8c0b1;
+  --c-teal-900: #0b3a33;
+  --c-teal-800: #0d443c;
+  --c-teal-700: #0f4b41;
+  --c-teal-600: #176b5c;
+  --c-teal-300: #7fc7b5;
+  --c-teal-200: #b5ded3;
+  --c-teal-100: #dff0ea;
+  --c-brass-800: #6d4a13;
+  --c-brass-700: #8a5f1e;
+  --c-brass-200: #efdcba;
+  --c-brass-100: #f7ecd9;
+  --c-red-800: #8d1a22;
+  --c-red-700: #9c1f28;
+  --c-red-500: #c2454c;
+  --c-red-200: #f2c9cb;
+  --c-red-100: #fbe8e8;
+  --c-green-800: #14512f;
+  --c-green-700: #1c6b45;
+  --c-green-200: #bfe3cf;
+  --c-green-100: #e3f3e9;
+  --c-amber-800: #6b4400;
+  --c-amber-700: #7d5300;
+  --c-amber-200: #f0d8a4;
+  --c-amber-100: #fdf2d8;
+  --c-blue-800: #164b68;
+  --c-blue-700: #1b587a;
+  --c-blue-200: #c3dcea;
+  --c-blue-100: #e3eff7;
+  --c-white: #fffefb;
+
+  /* ---- surfaces & ink ---- */
+  --bg: var(--c-parchment-100);
+  --bg-deep: var(--c-parchment-200);
+  --surface: var(--c-white);
+  --surface-2: #f3f0e9;
+  --surface-3: #e8e3d9;
+  --text: var(--c-ink-800);
+  --text-2: var(--c-ink-600);
+  --text-3: var(--c-ink-500);
+  --text-4: var(--c-ink-400);
+  --border: #e3ded4;
+  --border-strong: #cfc8ba;
+  --scrim: rgba(12, 23, 20, 0.46);
+
+  /* ---- brand ---- */
+  --primary: var(--c-teal-700);
+  --primary-hover: var(--c-teal-900);
+  --primary-ink: #0b3a33;
+  --primary-soft: #e7f2ee;
+  --primary-border: #b9d8cf;
+  --on-primary: #ffffff;
+  --accent: var(--c-brass-700);
+  --accent-soft: var(--c-brass-100);
+  --accent-border: var(--c-brass-200);
+
+  /* ---- feedback ---- */
+  --danger: var(--c-red-700);
+  --danger-hover: var(--c-red-800);
+  --danger-soft: var(--c-red-100);
+  --danger-border: var(--c-red-200);
+  --success: var(--c-green-700);
+  --success-soft: var(--c-green-100);
+  --success-border: var(--c-green-200);
+  --warning: var(--c-amber-700);
+  --warning-soft: var(--c-amber-100);
+  --warning-border: var(--c-amber-200);
+  --info: var(--c-blue-700);
+  --info-soft: var(--c-blue-100);
+  --info-border: var(--c-blue-200);
+
+  /* ---- focus ---- */
+  --focus: #0b6b58;
+  --focus-ring: rgba(15, 75, 65, 0.28);
+
+  /* ---- typography ---- */
+  --font-ui: 'IBM Plex Sans Arabic', 'Noto Naskh Arabic', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Amiri', 'Noto Naskh Arabic', 'Times New Roman', serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Menlo', monospace;
+  --fs-2xs: 10.5px;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 15px;
+  --fs-lg: 18px;
+  --fs-xl: 22px;
+  --fs-2xl: 28px;
+  --fs-3xl: 36px;
+  --lh-tight: 1.35;
+  --lh-normal: 1.6;
+  --lh-relaxed: 1.85;
+
+  /* ---- spacing ---- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-7: 32px;
+  --sp-8: 40px;
+  --sp-9: 56px;
+  --sp-10: 72px;
+
+  /* ---- radii ---- */
+  --r-1: 6px;
+  --r-2: 9px;
+  --r-3: 14px;
+  --r-4: 20px;
+  --r-full: 999px;
+
+  /* ---- elevation ---- */
+  --shadow-1: 0 1px 2px rgba(16, 32, 28, 0.06), 0 1px 1px rgba(16, 32, 28, 0.03);
+  --shadow-2: 0 4px 10px -2px rgba(16, 32, 28, 0.1), 0 2px 3px rgba(16, 32, 28, 0.05);
+  --shadow-3: 0 18px 40px -12px rgba(12, 23, 20, 0.3), 0 6px 14px -6px rgba(12, 23, 20, 0.18);
+  --shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+
+  /* ---- motion ---- */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 260ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.25, 1);
+
+  /* ---- sizing ---- */
+  --control-h: 36px;
+  --control-h-sm: 30px;
+  --control-h-lg: 42px;
+  --row-h: 44px;
+  --sidebar-w: 268px;
+  --sidebar-rail: 76px;
+  --topbar-h: 62px;
+  --bottom-nav-h: 60px;
+  --content-max: 1560px;
+  --table-max-h: 68vh;
+
+  /* ---- z-index ladder ---- */
+  --z-base: 1;
+  --z-sticky: 20;
+  --z-topbar: 50;
+  --z-drawer: 90;
+  --z-popover: 120;
+  --z-menu: 130;
+  --z-overlay: 200;
+  --z-dialog: 210;
+  --z-toast: 300;
+
+  /* ---- shell skin ---- */
+  --sidebar-bg: #0e211d;
+  --sidebar-fg: #d5e3de;
+  --sidebar-fg-dim: #93a8a1;
+  --sidebar-active: rgba(127, 199, 181, 0.14);
+  --sidebar-border: rgba(255, 255, 255, 0.08);
+  --topbar-bg: rgba(251, 249, 244, 0.86);
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0b1311;
+  --bg-deep: #070e0c;
+  --surface: #13201c;
+  --surface-2: #1a2925;
+  --surface-3: #233530;
+  --text: #eaf1ec;
+  --text-2: #c3d0ca;
+  --text-3: #9dada5;
+  --text-4: #7b8b84;
+  --border: #263733;
+  --border-strong: #354a44;
+  --scrim: rgba(0, 0, 0, 0.62);
+
+  --primary: #6fc7b1;
+  --primary-hover: #8ad8c3;
+  --primary-ink: #d8f3ea;
+  --primary-soft: #14322b;
+  --primary-border: #2a4f46;
+  --on-primary: #06211c;
+
+  --accent: #e0b56f;
+  --accent-soft: #2e2415;
+  --accent-border: #4b3a1e;
+
+  --danger: #f0918f;
+  --danger-hover: #f6a9a7;
+  --danger-soft: #35191a;
+  --danger-border: #552a2b;
+
+  --success: #7fd1a2;
+  --success-soft: #122b1e;
+  --success-border: #24462f;
+
+  --warning: #e6bd72;
+  --warning-soft: #2e2412;
+  --warning-border: #4a3a1d;
+
+  --info: #8dc2e2;
+  --info-soft: #10232e;
+  --info-border: #24414f;
+
+  --focus: #8ad8c3;
+  --focus-ring: rgba(138, 216, 195, 0.3);
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 4px 12px -2px rgba(0, 0, 0, 0.5);
+  --shadow-3: 0 20px 44px -14px rgba(0, 0, 0, 0.7);
+
+  --sidebar-bg: #071210;
+  --sidebar-fg: #cfe0da;
+  --sidebar-fg-dim: #80948d;
+  --sidebar-active: rgba(111, 199, 177, 0.16);
+  --sidebar-border: rgba(255, 255, 255, 0.07);
+  --topbar-bg: rgba(11, 19, 17, 0.88);
+}
+
+/* Density — only row height & control height change. */
+[data-density='compact'] {
+  --row-h: 34px;
+  --control-h: 32px;
+  --control-h-sm: 27px;
+  --fs-sm: 12.5px;
+}
+[data-density='comfortable'] {
+  --row-h: 52px;
+  --control-h: 40px;
+  --control-h-sm: 33px;
+}
+
+/* User zoom — set from إعدادات > المظهر. */
+:root { --user-font-scale: 1; }
+html { font-size: calc(100% * var(--user-font-scale)); }
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+  }
+}
+
+[data-motion='reduced'] *,
+[data-motion='reduced'] *::before,
+[data-motion='reduced'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+
+@media (forced-colors: active) {
+  :root {
+    --border: ButtonText;
+    --border-strong: ButtonText;
+    --focus: Highlight;
+  }
+}

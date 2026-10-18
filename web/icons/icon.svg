@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="مِداد">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#176b5c"/>
+      <stop offset="1" stop-color="#0b3a33"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6c187"/>
+      <stop offset="1" stop-color="#b4843c"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <circle cx="256" cy="256" r="188" fill="none" stroke="#ffffff" stroke-opacity="0.10" stroke-width="2"/>
+  <g fill="none" stroke="#f3efe4" stroke-width="18" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M256 118v268"/>
+    <path d="M176 386h160"/>
+    <path d="M150 170h212"/>
+    <path d="M150 170l-58 118a62 62 0 0 0 116 0z"/>
+    <path d="M362 170l58 118a62 62 0 0 1-116 0z"/>
+  </g>
+  <g fill="none" stroke="url(#brass)" stroke-width="10" stroke-linecap="round">
+    <path d="M216 118h80"/>
+    <path d="M196 386h120"/>
+  </g>
+</svg>
