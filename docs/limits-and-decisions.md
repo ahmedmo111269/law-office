@@ -7,7 +7,7 @@ This document separates **implemented reality** from **assumptions** and **open 
 | # | Decision | Current position | Why it matters |
 | --- | --- | --- | --- |
 | A1 | Target platforms and order | Assumed Windows desktop first, then Android, then PWA. | Determines which runtime/SQLite embedding to productionise and which profile is tested first. |
-| A2 | PWA storage | IndexedDB profile is declared in `DatabaseAdapter` but **not implemented**; repositories currently use SQL. Options: (a) async repository port for IndexedDB, (b) SQLite WASM + OPFS behind the same adapter. | This is the largest gap against “PWA web” and must be chosen before any web build. It is not honest to call the current code “SQLite on the web”. |
+| A2 | PWA storage | **Resolved 2026-10-18:** real IndexedDB engine implemented behind the async portable store contract, generated from the migrated SQLite schema, verified in Chromium across a browser restart and offline. | Remaining: installed-PWA shell/service worker, persistent-storage request and quota handling are not implemented. See `docs/local-storage-report.md`. |
 | A3 | Desktop/mobile runtime | No Electron/Tauri/Capacitor/native shell chosen. `node:sqlite` is used for development and tests only. | Production needs a supported SQLite binding, packaging, file permissions and update strategy. |
 | A4 | Encryption at rest | Not implemented; no encryption is claimed. | If office data requires SQLCipher/platform keystore, it must be designed and tested (key recovery, backups, migration). |
 | A5 | Attachment storage | Metadata only; bytes live outside the DB. Backup reports inventory and restore warns. | Need a decision: plain office folder, content-addressed store, or per-file vault; then an attachment backup unit. |
@@ -24,7 +24,7 @@ This document separates **implemented reality** from **assumptions** and **open 
 
 ## B. Implemented behaviour that differs from a naive reading of the brief
 
-1. **“SQLite on phone/desktop, IndexedDB on web”**: SQLite is implemented; IndexedDB is only an interface reservation. The PWA profile is not usable yet.
+1. **“SQLite on phone/desktop, IndexedDB on web”**: both engines are implemented; IndexedDB passes engine, parity and real-browser tests. There is still no installable PWA shell, so “open the installed app offline” is not yet claimed.
 2. **Backup includes database only**: attachment bytes are excluded; the manager reports their count and restore warns. This is documented, not silent.
 3. **No legal deadline calculations**: `judgment.user_appeal_deadline` is stored only when a user enters it. No appeal/limitation period is computed.
 4. **No remote sync**: outbox/conflict metadata exist, but there is no transport, no background worker and no cloud push.
@@ -66,7 +66,7 @@ This document separates **implemented reality** from **assumptions** and **open 
 
 ## E. Explicitly not implemented (do not describe as done)
 
-- IndexedDB adapter and PWA browser build.
+- Installable PWA shell/service worker, persistent-storage request, attachment storage (e.g. OPFS) and encryption.
 - Android/iOS/desktop packaging.
 - Network sync, server, authentication, conflict-resolution UI.
 - Encryption, SQLCipher, secrets management.

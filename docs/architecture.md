@@ -26,7 +26,7 @@
 ├──────────────────────────────────────────────────────────────┤
 │ Storage boundary           src/db/adapter.ts                  │
 │   SQLite adapter           src/db/sqlite/sqlite-adapter.ts    │
-│   IndexedDB adapter        NOT IMPLEMENTED (see decisions)    │
+│   IndexedDB engine         src/db/indexeddb (implemented)     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -44,7 +44,7 @@ Rules enforced by construction:
 | --- | --- | --- |
 | Windows / macOS / Linux desktop | SQLite file, WAL, `synchronous=FULL`, foreign keys ON, 5 s busy timeout | Implemented and tested with `node:sqlite` |
 | Android / iOS native shell | SQLite file through the same `DatabaseAdapter` | Interface ready; native embedding not packaged here |
-| PWA / browser | IndexedDB logical store | Interface declared (`engine: 'indexeddb'`), **no adapter and no repository port yet** |
+| PWA / browser | IndexedDB object stores behind the async portable store | **Implemented**; 15 engine tests, 3 parity tests and a Chromium restart/offline test. See `docs/local-storage-implementation.md`. |
 
 The SQLite adapter owns: `BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK`, nested `SAVEPOINT`s, prepared statements, row normalisation, `VACUUM INTO` snapshots, integrity/FK checks, and application-id enforcement. See `docs/decisions.md` for why this split exists and what is *not* claimed.
 

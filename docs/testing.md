@@ -17,7 +17,7 @@ npm run typecheck          # production sources (src/)
 npx tsc -p tsconfig.test.json   # src + tests + benchmark script
 ```
 
-`tsconfig.json` intentionally excludes `test/`; `tsconfig.test.json` includes `src/**/*.ts`, `test/**/*.ts` and `scripts/benchmark.ts` with `noEmit`.
+`tsconfig.json` intentionally excludes `test/`; `tsconfig.test.json` includes `src/**/*.ts`, `test/**/*.ts` and `scripts/**/*.ts` (test tooling) with `noEmit`.
 
 ## Test suite
 
@@ -34,6 +34,30 @@ npm run test:verbose
 ```
 
 The suite creates a fresh SQLite file in a unique temporary directory for each test, exercises real repositories, closes the database, and deletes the directory. Nothing is mocked at the storage layer. Tests run in separate Node processes per file.
+
+Two additional suites cover the PWA engine:
+
+```bash
+npm run test:idb      # 15 IndexedDB engine tests + 3 cross-engine parity tests
+npm run test:browser  # real Chromium: restart persistence + offline storage
+```
+
+`test/indexeddb.test.ts` opens real IndexedDB object stores through
+`fake-indexeddb` (a Node implementation of the browser API — a test double, not
+a production engine) and verifies stores/indexes for all 57 tables, seed
+determinism, constraints, rollback, reopen persistence, backup/restore,
+migrations, search, numbering, cascade delete/restore, finance rules, audit and
+outbox rows, and absence of network calls. `test/engine-parity.test.ts` runs the
+same domain scenario on SQLite and IndexedDB, compares the functional result,
+checks equal error codes for invalid writes, and restores an IndexedDB backup
+into SQLite.
+
+`scripts/browser-selftest.ts` bundles the browser harness with esbuild, serves
+it from `127.0.0.1`, launches Chromium with a persistent profile, runs a write
+phase, kills the browser, relaunches it, runs a verify phase with the network
+emulated offline, and asserts restart persistence, relations, search, integrity,
+migration ledger and backup validity. It requires the dev dependency
+`@sparticuz/chromium`; nothing it installs is part of the application runtime.
 
 ### What is covered
 
@@ -100,10 +124,16 @@ npm run db:bench -- --scale=2 --db=data/benchmark2.sqlite
 ```bash
 node --disable-warning=ExperimentalWarning scripts/gen-manifest.ts
 node --disable-warning=ExperimentalWarning scripts/gen-schema-doc.ts
+node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts
+node --disable-warning=ExperimentalWarning scripts/gen-portable-seed.ts
 ```
 
 - `gen-manifest.ts` writes `src/schema/v1/manifest.ts` (required tables/indexes/triggers). Regenerate after any DDL change.
 - `gen-schema-doc.ts` writes `docs/schema.md` from the migrated schema.
+- `gen-portable-schema.ts` and `gen-portable-seed.ts` write the engine-neutral
+  descriptor and seed used by the IndexedDB profile (`npm run db:gen-portable`).
+  Both are deterministic; run them after any DDL or seed change and commit the
+  generated files with the change.
 
 Both scripts open an in-memory database and run migration 1; they do not touch the office file.
 

@@ -91,7 +91,7 @@ Interpretation: per-record cost is dominated by the deliberate durability work (
 | Area | Why deferred |
 | --- | --- |
 | Real network sync / remote apply | Transport is explicitly out of scope; only local outbox/conflict metadata exists. |
-| IndexedDB adapter / PWA profile | Not implemented; repositories currently require SQL. |
+| IndexedDB engine / PWA profile | Implemented 2026-10-18: 15 engine tests + 3 parity tests + real Chromium restart/offline test. See `docs/local-storage-report.md`. |
 | Android/iOS packaging and SQLite embedding | No mobile shell in this phase. |
 | Encryption / SQLCipher / key management | Not implemented; no encryption is claimed. |
 | Multi-process write contention stress | Single-process design and busy timeout are configured; no sustained contention test yet. |

@@ -8,7 +8,14 @@ Status: accepted for the data-foundation phase. Items marked **needs approval** 
 
 **Implemented:** SQLite adapter (`node:sqlite` in development/tests).
 
-**Not implemented:** an IndexedDB adapter. The interface reserves `engine: 'indexeddb'`, but repositories currently speak SQL; a browser profile needs either a repository port per engine or SQLite compiled to WebAssembly with an OPFS-backed file. No claim of “SQLite in the browser” is made. The PWA can only be delivered after that adapter (or a WASM SQLite profile) is built and tested; it is deferred, not hidden.
+**Implemented 2026-10-18:** a real IndexedDB engine (`src/db/indexeddb/`) with
+an engine-neutral portable layer (`src/portable/`) generated from the migrated
+SQLite schema, browser entry point (`src/browser/`) and a Chromium
+restart/offline test. The earlier text below describes the original reservation;
+see `docs/local-storage-implementation.md` and `docs/local-storage-report.md`
+for what is now true. SQLite remains the desktop/native engine; IndexedDB is the
+PWA engine; SQL is not translated to IndexedDB — behaviour is re-implemented on
+the shared contract and the differences are documented and tested.
 
 ## D2. SQLite for desktop and native mobile, IndexedDB for PWA
 
@@ -23,7 +30,7 @@ The Windows/Android/PWA target set is an assumption (the same code can serve mac
 
 ## D3. Synchronous API for the local profile
 
-A law-office operation is short and local. Synchronous repository calls make atomicity auditable and prevent unrelated writes interleaving in one transaction. Browser IndexedDB is asynchronous; a future browser adapter must either expose a synchronous facade over a worker or the repository layer must gain an async port. This is a known cost of the two-engine choice.
+A law-office operation is short and local. Synchronous repository calls make atomicity auditable and prevent unrelated writes interleaving in one transaction. Browser IndexedDB is asynchronous, so the PWA profile uses an async store contract (`src/portable/store.ts`) instead of pretending the synchronous adapter fits. The desktop repositories remain synchronous and unchanged.
 
 ## D4. UUID identity, separate display numbers
 
@@ -77,4 +84,4 @@ No field-level encryption and no password storage are implemented in this phase.
 
 ## D15. Test strategy
 
-Twenty required scenarios are automated with `node:test` against real SQLite files in temporary directories, plus a local load benchmark. Tests assert constraints, transaction rollback, reopen persistence, Arabic search, backup/restore, migration success/failure, conflict records and offline operation. Sync transport, IndexedDB, mobile packaging, encryption and multi-process stress are **not** tested because they are not implemented; they are listed as deferred in `docs/test-results.md`.
+Twenty required scenarios are automated with `node:test` against real SQLite files in temporary directories, plus a local load benchmark. Tests assert constraints, transaction rollback, reopen persistence, Arabic search, backup/restore, migration success/failure, conflict records and offline operation. IndexedDB now has 15 engine tests, 3 cross-engine parity tests and a real Chromium restart/offline test. Sync transport, installed-PWA packaging, attachment storage, encryption and multi-process stress remain **not implemented or not tested**; see `docs/local-storage-report.md`.

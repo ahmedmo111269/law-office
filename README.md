@@ -1,11 +1,12 @@
 # Law Office — offline-first data foundation
 
-Local-first database and repository layer for an Egyptian law-office management program. **No UI, no network sync, no cloud, no AI, no paid services.** Everything runs against a local SQLite file.
+Local-first database and repository layer for an Egyptian law-office management program. **No UI, no network sync, no cloud, no AI, no paid services.** SQLite is the desktop/native engine; **IndexedDB is the real PWA engine** (implemented and browser-tested, not an interface reservation).
 
 - Branch: `arena/691f011a-law-office` (baseline `main` at `b5769b8`)
 - Schema: **v1** · 57 application tables · 90 indexes · 16 triggers · 54 lookup lists / 374 reference items
-- Tests: **21/21 passing** (`node:test`, real SQLite files, temporary directories)
-- Engine status: **SQLite implemented** for desktop/native; **IndexedDB is only an interface reservation — not implemented** (see `docs/decisions.md`, `docs/limits-and-decisions.md`)
+- Tests: **39/39 passing** (`node:test`): 21 SQLite scenarios, 15 IndexedDB engine tests, 3 cross-engine parity tests
+- Real-browser test: Chromium 153 restarts with a persistent profile and reads back IndexedDB data with the network disabled (`npm run test:browser`)
+- Engines: SQLite for desktop/native (unchanged); IndexedDB for the PWA; shared portable write semantics and documented differences
 
 ## Quick start
 
@@ -50,7 +51,9 @@ npm run db:backup -- --db data/office.sqlite --label initial
 | [`docs/test-results.md`](docs/test-results.md) | Executed results, 20-scenario coverage, deferred tests |
 | [`docs/benchmark-results.md`](docs/benchmark-results.md) | Recorded load-test numbers |
 | [`docs/limits-and-decisions.md`](docs/limits-and-decisions.md) | Issues, risks, pending approvals, explicitly not implemented |
-| [`docs/final-report.md`](docs/final-report.md) | Phase report: repo state, deliverables, results, next step |
+| [`docs/final-report.md`](docs/final-report.md) | Phase-1 report: repo state, deliverables, results, next step |
+| [`docs/local-storage-implementation.md`](docs/local-storage-implementation.md) | How SQLite and IndexedDB actually store data, constraint mapping, migration and backup design |
+| [`docs/local-storage-report.md`](docs/local-storage-report.md) | Delivery report: engines, files, executed results, restart/offline proof, limits, engine differences |
 
 ## Data-safety rules
 
@@ -65,8 +68,11 @@ npm run db:backup -- --db data/office.sqlite --label initial
 ```bash
 npm run typecheck          # src only
 npm run typecheck:tests    # src + test + benchmark
-npm test                   # 20 required scenarios + outbox test
+npm test                   # 39 tests (SQLite + IndexedDB + parity)
+npm run test:idb           # IndexedDB engine + cross-engine parity only
+npm run test:browser       # real Chromium restart + offline storage test
 npm run db:bench -- --scale=1
 npm run db:gen-manifest    # regenerate required-schema manifest
 npm run db:gen-schema      # regenerate docs/schema.md
+npm run db:gen-portable    # regenerate the portable schema + seed from the migrated SQLite schema
 ```

@@ -44,7 +44,7 @@
 | --- | --- | --- |
 | Windows/macOS/Linux desktop | SQLite file, WAL, FK ON, `synchronous=FULL`, 5 s busy timeout | Implemented/tested via `node:sqlite` |
 | Android/iOS native | Same SQLite contract | Interface ready; not packaged/tested on device |
-| PWA/browser | IndexedDB | **Not implemented**; only the `engine: 'indexeddb'` reservation exists. Repositories currently require SQL. Total honesty: the PWA profile is not usable yet. |
+| PWA/browser | IndexedDB | **Not implemented at the time of this report**; the IndexedDB engine was added afterwards (2026-10-18). See `docs/local-storage-report.md` for the current state. |
 | Server | none | Deliberately absent |
 
 `node:sqlite` is a development/test binding. A production desktop/mobile runtime and a browser profile are pending decisions (A2/A3 in the limits document).
@@ -114,7 +114,7 @@ Exact tables and per-test mapping: `docs/test-results.md`.
 
 ## 10. Known limits and risks (summary)
 
-1. **PWA storage is not built**; IndexedDB is only an interface reservation.
+1. ~~PWA storage is not built~~ — **superseded on 2026-10-18** by the implemented IndexedDB engine; see `docs/local-storage-report.md`.
 2. **No production runtime/packaging**; `node:sqlite` is experimental and used for development/tests.
 3. **No encryption**; protection is OS/file-permission only, and this is not presented as encrypted storage.
 4. **Attachment bytes are not in backups.**
@@ -127,7 +127,7 @@ Exact tables and per-test mapping: `docs/test-results.md`.
 11. **Finance settings** `finance.receipt_on_payment` and `finance.default_currency` are code defaults, not seeded settings.
 12. **No hard-delete/purge/retention policy.**
 13. **Device short-code collision** across independent databases is theoretically possible (UUID prefix checks are local).
-14. **IndexedDB/SQL portability**: repositories use SQL; a browser engine needs a port or SQLite-WASM decision.
+14. ~~IndexedDB/SQL portability~~ — resolved with a generated portable schema and a shared async store contract; see `docs/local-storage-implementation.md`.
 
 Defects found and fixed during the phase (missing person/organization sync columns, court `name_ar`, device prefix collision, ignored file client links, reversal totals, soft-delete subtype cascade) are documented in `docs/limits-and-decisions.md`.
 
@@ -135,7 +135,7 @@ Defects found and fixed during the phase (missing person/organization sync colum
 
 Priority order:
 
-1. **PWA storage strategy** (IndexedDB repository port vs SQLite-WASM/OPFS).
+1. ~~PWA storage strategy~~ — IndexedDB engine implemented and tested; remaining PWA decisions are the installable shell, persistent storage and attachments.
 2. **Desktop/mobile production runtime** and supported OS versions.
 3. **Encryption requirements** (SQLCipher/keystore, key recovery, backup interaction).
 4. **Attachment storage and backup policy.**
