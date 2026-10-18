@@ -8,6 +8,19 @@ Arabic-first (RTL) law-office management app for Egyptian practice, running enti
 - Real-browser test: Chromium 153 restarts with a persistent profile and reads back IndexedDB data with the network disabled (`npm run test:browser`)
 - Engines: SQLite for desktop/native (unchanged); IndexedDB for the PWA; shared portable write semantics and documented differences
 
+## إذا ظهرت صفحة README بدل البرنامج
+
+هذا خلل في **مصدر نشر GitHub Pages**، وليس في قاعدة البيانات. الحل الدائم لصاحب المستودع:
+
+1. افتح [Settings → Pages](https://github.com/ahmedmo111269/law-office/settings/pages).
+2. تحت **Build and deployment → Source** اختر **GitHub Actions** بدل **Deploy from a branch**.
+3. بعد دمج إصلاح النشر في `main`، افتح **Actions → Deploy PWA to GitHub Pages → Run workflow** على `main` وانتظر نجاح النشر.
+4. افتح https://ahmedmo111269.github.io/law-office/ وأعد تحميل الصفحة. يجب أن يظهر عنوان «مِداد — إدارة مكتب المحاماة»، لا صفحة README.
+
+النشر الصحيح يرفع محتويات `dist/` التي ينتجها `npm run build:web`، وليس جذر المستودع أو مجلد `web/` وحده. يتضمن مسار النشر انتظار انتهاء نشر Pages القديم عند استمرار استخدامه، لمنعه من استبدال التطبيق بصفحة README. إذا انتهت مهلة الانتظار، غيّر Source كما سبق وأعد تشغيل النشر.
+
+**لا تمسح بيانات الموقع أو IndexedDB لمعالجة هذه المشكلة**؛ فقد تحتوي على بيانات المكتب المحلية. لا يتطلب إصلاح النشر حذف أي بيانات.
+
 ## Quick start
 
 ```bash

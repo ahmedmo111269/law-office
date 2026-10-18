@@ -68,6 +68,39 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      # Legacy Pages has its own deployment job. Waiting only for its build, or
+      # racing it on push, can leave README.html as the final live deployment.
+      # Keep this compatibility barrier until Pages → Source is GitHub Actions.
+      - name: Wait for legacy Pages deployment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: pages } = await github.rest.repos.getPages({ owner, repo });
+            if (pages.build_type !== 'legacy') {
+              core.info('Pages uses GitHub Actions; no legacy deployment to wait for.');
+              return;
+            }
+            core.warning('Pages still uses deploy-from-branch. Set Settings → Pages → Source to GitHub Actions.');
+            const sha = context.eventName === 'workflow_run'
+              ? context.payload.workflow_run.head_sha
+              : context.sha;
+            const deadline = Date.now() + 10 * 60 * 1000;
+            while (Date.now() < deadline) {
+              const { data } = await github.rest.actions.listWorkflowRunsForRepo({
+                owner, repo, head_sha: sha, per_page: 100,
+              });
+              const legacy = data.workflow_runs.filter(run =>
+                run.name === 'pages build and deployment' && run.id !== context.runId
+              );
+              if (legacy.length && legacy.every(run => run.status === 'completed')) {
+                core.info('Legacy Pages deployment finished; publishing the app last.');
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            core.setFailed('Legacy Pages did not finish within 10 minutes. Switch Pages Source to GitHub Actions and rerun this workflow.');
+
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
