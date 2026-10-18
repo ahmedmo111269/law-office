@@ -1,10 +1,10 @@
-# Law Office — offline-first data foundation
+# مِداد — Law Office Management
 
-Local-first database and repository layer for an Egyptian law-office management program. **No UI, no network sync, no cloud, no AI, no paid services.** SQLite is the desktop/native engine; **IndexedDB is the real PWA engine** (implemented and browser-tested, not an interface reservation).
+Arabic-first (RTL) law-office management app for Egyptian practice, running entirely on the local device. The interface is built on the existing offline-first data foundation: **SQLite** for desktop/CLI and **IndexedDB** for the installable PWA. No server, no cloud, no AI, no paid services, no CDN — the published app is a static bundle at **https://ahmedmo111269.github.io/law-office/**.
 
-- Branch: `arena/691f011a-law-office` (baseline `main` at `b5769b8`)
+- Branch: `arena/7c319720-law-office` (baseline `main` at `409f359`)
 - Schema: **v1** · 57 application tables · 90 indexes · 16 triggers · 54 lookup lists / 374 reference items
-- Tests: **39/39 passing** (`node:test`): 21 SQLite scenarios, 15 IndexedDB engine tests, 3 cross-engine parity tests
+- Tests: **47/47 passing** (`node:test`) plus **32/32** UI→IndexedDB assertions and **61/61** route/responsive checks
 - Real-browser test: Chromium 153 restarts with a persistent profile and reads back IndexedDB data with the network disabled (`npm run test:browser`)
 - Engines: SQLite for desktop/native (unchanged); IndexedDB for the PWA; shared portable write semantics and documented differences
 
@@ -12,9 +12,14 @@ Local-first database and repository layer for an Egyptian law-office management 
 
 ```bash
 npm install
+npm run build:web      # bundle the PWA into dist/
+npm run serve:web      # http://127.0.0.1:4173/law-office/
+
 npm run typecheck
 npm run typecheck:tests
 npm test
+npm run test:ui        # 20 UI → IndexedDB scenarios in headless Chromium
+npm run test:smoke     # 22 routes + dialogs + 320…1440 layouts
 
 npm run db:init   -- --db data/office.sqlite
 npm run db:check  -- --db data/office.sqlite
@@ -23,6 +28,16 @@ npm run db:backup -- --db data/office.sqlite --label initial
 ```
 
 `data/` and `*.sqlite` are ignored by Git. Do not put real client data in a development checkout.
+
+## The application
+
+- Arabic RTL interface, local fonts (IBM Plex Sans Arabic + Amiri), light/dark themes and density settings.
+- 24 routes: office day, tasks, appointments, files (with the full case-file page), clients, parties, cases, hearings, judgments, execution, announcements, documents, contracts/POAs, finance, reports, archive, settings and global search.
+- Reusable component library: advanced data table (column show/hide/reorder/resize/pin, density, saved views, bulk actions), dialogs, forms, pickers, menus, toasts, empty/loading states.
+- Every write goes through `src/ui/services` → `PortableLawOffice` → `DatabaseAdapter`; no `localStorage` shadow store and no invented sample data.
+- Offline-first PWA with a service worker and precache manifest; data lives in IndexedDB and survives reloads and browser restarts.
+- UI tests drive the built app in Chromium and assert rows by reading IndexedDB directly.
+- Design system and page inventory: [`docs/ui-design-system.md`](docs/ui-design-system.md).
 
 ## What exists
 
@@ -52,6 +67,8 @@ npm run db:backup -- --db data/office.sqlite --label initial
 | [`docs/benchmark-results.md`](docs/benchmark-results.md) | Recorded load-test numbers |
 | [`docs/limits-and-decisions.md`](docs/limits-and-decisions.md) | Issues, risks, pending approvals, explicitly not implemented |
 | [`docs/final-report.md`](docs/final-report.md) | Phase-1 report: repo state, deliverables, results, next step |
+| [`docs/ui-design-system.md`](docs/ui-design-system.md) | Design system: tokens, typography, IA, components, responsive, accessibility |
+| [`docs/final-report-ui.md`](docs/final-report-ui.md) | Phase-2 delivery report: UI, wiring, tests, offline, published URL, limits |
 | [`docs/local-storage-implementation.md`](docs/local-storage-implementation.md) | How SQLite and IndexedDB actually store data, constraint mapping, migration and backup design |
 | [`docs/local-storage-report.md`](docs/local-storage-report.md) | Delivery report: engines, files, executed results, restart/offline proof, limits, engine differences |
 
