@@ -1,7 +1,11 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 
 export interface LookupListRecord extends EntityRecord {
   readonly code: string;
@@ -40,16 +44,28 @@ export class LookupRepository {
 
   constructor(deps: RepositoryDependencies) {
     this.deps = deps;
-    this.lists = new BaseRepository<LookupListRecord>(deps, getSyncEntity('lookup_list'));
-    this.items = new BaseRepository<LookupItemRecord>(deps, getSyncEntity('lookup_item'));
+    this.lists = new BaseRepository<LookupListRecord>(
+      deps,
+      getSyncEntity('lookup_list'),
+    );
+    this.items = new BaseRepository<LookupItemRecord>(
+      deps,
+      getSyncEntity('lookup_item'),
+    );
   }
 
   allLists(): LookupListRecord[] {
-    return this.lists.list({ limit: 500, orderBy: { column: 'code', direction: 'asc' } });
+    return this.lists.list({
+      limit: 500,
+      orderBy: { column: 'code', direction: 'asc' },
+    });
   }
 
   getListByCode(code: string): LookupListRecord | undefined {
-    return this.lists.list({ filters: [{ column: 'code', value: code }], limit: 1 })[0];
+    return this.lists.list({
+      filters: [{ column: 'code', value: code }],
+      limit: 1,
+    })[0];
   }
 
   requireList(code: string): LookupListRecord {
@@ -58,7 +74,10 @@ export class LookupRepository {
     return list;
   }
 
-  itemsOf(listCode: string, options: { includeInactive?: boolean } = {}): LookupItemView[] {
+  itemsOf(
+    listCode: string,
+    options: { includeInactive?: boolean } = {},
+  ): LookupItemView[] {
     const list = this.requireList(listCode);
     const rows = this.deps.db.query<SqlRow>(
       `SELECT i.*, l.code AS list_code
@@ -68,10 +87,13 @@ export class LookupRepository {
        ORDER BY i.sort_order, i.name_ar`,
       [list.id],
     );
-    return rows.map((row) => ({ ...row } as LookupItemView));
+    return rows.map((row) => ({ ...row }) as LookupItemView);
   }
 
-  itemById(id: string, options: { includeInactive?: boolean } = {}): LookupItemView | undefined {
+  itemById(
+    id: string,
+    options: { includeInactive?: boolean } = {},
+  ): LookupItemView | undefined {
     const row = this.deps.db.get<SqlRow>(
       `SELECT i.*, l.code AS list_code
        FROM lookup_item i JOIN lookup_list l ON l.id = i.list_id
@@ -96,27 +118,40 @@ export class LookupRepository {
     const item = this.itemById(id);
     if (!item) throw new NotFoundError('lookup_item', id);
     if (listCode && item.list_code !== listCode) {
-      throw new ValidationError(`lookup item ${id} does not belong to list ${listCode}`, {
-        itemId: id,
-        expectedList: listCode,
-        actualList: item.list_code,
-      });
+      throw new ValidationError(
+        `lookup item ${id} does not belong to list ${listCode}`,
+        {
+          itemId: id,
+          expectedList: listCode,
+          actualList: item.list_code,
+        },
+      );
     }
     return item;
   }
 
-  requireItemByCode(listCode: string, code: string, field = 'code'): LookupItemView {
+  requireItemByCode(
+    listCode: string,
+    code: string,
+    field = 'code',
+  ): LookupItemView {
     const item = this.itemByCode(listCode, code);
     if (!item) {
-      throw new ValidationError(`unknown ${field} "${code}" in list ${listCode}`, {
-        list: listCode,
-        code,
-      });
+      throw new ValidationError(
+        `unknown ${field} "${code}" in list ${listCode}`,
+        {
+          list: listCode,
+          code,
+        },
+      );
     }
     return item;
   }
 
-  resolveOptional(listCode: string, code: string | undefined | null): string | null {
+  resolveOptional(
+    listCode: string,
+    code: string | undefined | null,
+  ): string | null {
     if (code === undefined || code === null || code === '') return null;
     return this.requireItemByCode(listCode, code).id;
   }
@@ -127,9 +162,13 @@ export class LookupRepository {
     nameEn?: string;
     description?: string;
   }): LookupListRecord {
-    if (!CODE_RE.test(input.code)) throw new ValidationError('invalid lookup list code');
+    if (!CODE_RE.test(input.code))
+      throw new ValidationError('invalid lookup list code');
     if (this.getListByCode(input.code)) {
-      throw new ConflictError(`lookup list ${input.code} already exists`, 'ALREADY_EXISTS');
+      throw new ConflictError(
+        `lookup list ${input.code} already exists`,
+        'ALREADY_EXISTS',
+      );
     }
     return this.lists.insert({
       code: input.code,
@@ -143,12 +182,22 @@ export class LookupRepository {
 
   addItem(
     listCode: string,
-    input: { code: string; nameAr: string; nameEn?: string; sortOrder?: number; parentId?: string },
+    input: {
+      code: string;
+      nameAr: string;
+      nameEn?: string;
+      sortOrder?: number;
+      parentId?: string;
+    },
   ): LookupItemRecord {
     const list = this.requireList(listCode);
-    if (!CODE_RE.test(input.code)) throw new ValidationError('invalid lookup item code');
+    if (!CODE_RE.test(input.code))
+      throw new ValidationError('invalid lookup item code');
     if (this.itemByCode(listCode, input.code)) {
-      throw new ConflictError(`lookup item ${input.code} already exists`, 'ALREADY_EXISTS');
+      throw new ConflictError(
+        `lookup item ${input.code} already exists`,
+        'ALREADY_EXISTS',
+      );
     }
     if (input.parentId) this.requireItem(input.parentId, listCode);
     const maxSort =
@@ -170,7 +219,12 @@ export class LookupRepository {
 
   updateItem(
     id: string,
-    patch: { nameAr?: string; nameEn?: string | null; sortOrder?: number; isActive?: boolean },
+    patch: {
+      nameAr?: string;
+      nameEn?: string | null;
+      sortOrder?: number;
+      isActive?: boolean;
+    },
   ): LookupItemRecord {
     const item = this.requireItem(id);
     const update: Record<string, string | number | null> = {};

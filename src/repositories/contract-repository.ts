@@ -1,10 +1,14 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
 import type { NumberSeriesService } from '../services/number-series.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoDate } from '../util/dates.ts';
 import { assertMinorAmount } from '../util/money.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 
 export interface ContractRecord extends EntityRecord {
@@ -44,13 +48,26 @@ export class ContractRepository {
   private readonly contractParties: BaseRepository<EntityRecord>;
   private readonly poas: BaseRepository<PoaRecord>;
 
-  constructor(deps: RepositoryDependencies, lookups: LookupRepository, numbers: NumberSeriesService) {
+  constructor(
+    deps: RepositoryDependencies,
+    lookups: LookupRepository,
+    numbers: NumberSeriesService,
+  ) {
     this.deps = deps;
     this.lookups = lookups;
     this.numbers = numbers;
-    this.contracts = new BaseRepository<ContractRecord>(deps, getSyncEntity('contract'));
-    this.contractParties = new BaseRepository(deps, getSyncEntity('contract_party'));
-    this.poas = new BaseRepository<PoaRecord>(deps, getSyncEntity('power_of_attorney'));
+    this.contracts = new BaseRepository<ContractRecord>(
+      deps,
+      getSyncEntity('contract'),
+    );
+    this.contractParties = new BaseRepository(
+      deps,
+      getSyncEntity('contract_party'),
+    );
+    this.poas = new BaseRepository<PoaRecord>(
+      deps,
+      getSyncEntity('power_of_attorney'),
+    );
   }
 
   createContract(input: {
@@ -67,9 +84,14 @@ export class ContractRepository {
     fileId?: string;
     termsSummary?: string;
     notes?: string;
-    parties?: ReadonlyArray<{ partyId: string; roleCode: string; isPrimary?: boolean }>;
+    parties?: ReadonlyArray<{
+      partyId: string;
+      roleCode: string;
+      isPrimary?: boolean;
+    }>;
   }): ContractRecord {
-    if (!input.title?.trim()) throw new ValidationError('contract title is required');
+    if (!input.title?.trim())
+      throw new ValidationError('contract title is required');
     if (input.fileId) this.requireExisting('case_file', input.fileId);
     for (const dateField of ['signedOn', 'startOn', 'endOn'] as const) {
       const value = input[dateField];
@@ -78,18 +100,24 @@ export class ContractRepository {
     if (input.endOn && input.startOn && input.endOn < input.startOn) {
       throw new ValidationError('end date cannot precede start date');
     }
-    if (input.valueMinor !== undefined) assertMinorAmount(input.valueMinor, 'valueMinor');
+    if (input.valueMinor !== undefined)
+      assertMinorAmount(input.valueMinor, 'valueMinor');
     const currency = input.currencyCode ?? 'EGP';
     this.requireCurrency(currency);
     const contractNumber =
       input.contractNumber?.trim() ||
-      ((input.generateNumber ?? true) ? this.numbers.next('contract.number').formatted : null);
+      ((input.generateNumber ?? true)
+        ? this.numbers.next('contract.number').formatted
+        : null);
 
     return this.deps.db.transaction(() => {
       const contract = this.contracts.insert({
         contract_number: contractNumber,
         title: input.title.trim(),
-        contract_type_id: this.lookups.resolveOptional('contract_type', input.contractTypeCode),
+        contract_type_id: this.lookups.resolveOptional(
+          'contract_type',
+          input.contractTypeCode,
+        ),
         status_id: this.lookups.requireItemByCode(
           'contract_status',
           input.statusCode ?? 'draft',
@@ -158,7 +186,9 @@ export class ContractRepository {
     notes?: string;
   }): PoaRecord {
     if (input.principalPartyId === input.agentPartyId) {
-      throw new ValidationError('principal and agent must be different parties');
+      throw new ValidationError(
+        'principal and agent must be different parties',
+      );
     }
     this.requireExisting('party', input.principalPartyId);
     this.requireExisting('party', input.agentPartyId);
@@ -170,7 +200,9 @@ export class ContractRepository {
     }
     const poaNumber =
       input.poaNumber?.trim() ||
-      ((input.generateNumber ?? true) ? this.numbers.next('poa.number').formatted : null);
+      ((input.generateNumber ?? true)
+        ? this.numbers.next('poa.number').formatted
+        : null);
 
     return this.poas.insert({
       instrument_kind_id: this.lookups.requireItemByCode(
@@ -185,7 +217,10 @@ export class ContractRepository {
       principal_party_id: input.principalPartyId,
       agent_party_id: input.agentPartyId,
       scope_text: input.scopeText ?? null,
-      status_id: this.lookups.requireItemByCode('poa_status', input.statusCode ?? 'active').id,
+      status_id: this.lookups.requireItemByCode(
+        'poa_status',
+        input.statusCode ?? 'active',
+      ).id,
       file_id: input.fileId ?? null,
       notes: input.notes ?? null,
       archived_at: null,
@@ -196,7 +231,10 @@ export class ContractRepository {
     return this.contracts.requireById(id);
   }
 
-  getContractFull(id: string): { contract: ContractRecord; parties: ReadonlyArray<SqlRow> } {
+  getContractFull(id: string): {
+    contract: ContractRecord;
+    parties: ReadonlyArray<SqlRow>;
+  } {
     const contract = this.contracts.requireById(id);
     const parties = this.deps.db.query<SqlRow>(
       `SELECT cp.*, p.display_name, r.name_ar AS role_name
@@ -220,16 +258,20 @@ export class ContractRepository {
     const poa = this.poas.requireById(id);
     return {
       poa,
-      principal: this.deps.db.get<SqlRow>('SELECT id, display_name FROM party WHERE id = ?', [
-        poa.principal_party_id,
-      ]),
-      agent: this.deps.db.get<SqlRow>('SELECT id, display_name FROM party WHERE id = ?', [
-        poa.agent_party_id,
-      ]),
+      principal: this.deps.db.get<SqlRow>(
+        'SELECT id, display_name FROM party WHERE id = ?',
+        [poa.principal_party_id],
+      ),
+      agent: this.deps.db.get<SqlRow>(
+        'SELECT id, display_name FROM party WHERE id = ?',
+        [poa.agent_party_id],
+      ),
     };
   }
 
-  listContracts(options: { limit?: number; offset?: number } = {}): ContractRecord[] {
+  listContracts(
+    options: { limit?: number; offset?: number } = {},
+  ): ContractRecord[] {
     return this.contracts.list({
       limit: options.limit ?? 50,
       offset: options.offset ?? 0,
@@ -260,16 +302,29 @@ export class ContractRepository {
     return this.poas.archive(id);
   }
 
-  softDeleteContract(id: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.contracts.softDelete(id, { ...(reason === undefined ? {} : { reason }) });
+  softDeleteContract(
+    id: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.contracts.softDelete(id, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
-  restoreContract(id: string): { batchId: string | null; restoredCount: number } {
+  restoreContract(id: string): {
+    batchId: string | null;
+    restoredCount: number;
+  } {
     return this.contracts.restore(id);
   }
 
-  softDeletePoa(id: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.poas.softDelete(id, { ...(reason === undefined ? {} : { reason }) });
+  softDeletePoa(
+    id: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.poas.softDelete(id, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restorePoa(id: string): { batchId: string | null; restoredCount: number } {
@@ -286,7 +341,12 @@ export class ContractRepository {
   }
 
   private requireCurrency(code: string): void {
-    if (!this.deps.db.get('SELECT code FROM currency WHERE code = ? AND is_active = 1', [code])) {
+    if (
+      !this.deps.db.get(
+        'SELECT code FROM currency WHERE code = ? AND is_active = 1',
+        [code],
+      )
+    ) {
       throw new ValidationError(`unknown currency ${code}`);
     }
   }

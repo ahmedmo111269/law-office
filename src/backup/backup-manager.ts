@@ -1,3 +1,4 @@
+import { PORTABLE_SCHEMA } from '../schema/current.ts';
 import { createHash } from 'node:crypto';
 import {
   closeSync,
@@ -87,38 +88,60 @@ export class BackupManager {
     this.options = options;
   }
 
-  create(options: { label?: string; destinationDir?: string } = {}): BackupInfo {
+  create(
+    options: { label?: string; destinationDir?: string } = {},
+  ): BackupInfo {
     if (this.db.engine !== 'sqlite') {
-      throw new BackupError('UNSUPPORTED_ENGINE', 'SQLite backup requires the SQLite adapter');
+      throw new BackupError(
+        'UNSUPPORTED_ENGINE',
+        'SQLite backup requires the SQLite adapter',
+      );
     }
-    const vacuum = (this.db as unknown as { vacuumInto?: (dest: string) => void }).vacuumInto;
+    const vacuum = (
+      this.db as unknown as { vacuumInto?: (dest: string) => void }
+    ).vacuumInto;
     if (typeof vacuum !== 'function') {
-      throw new BackupError('UNSUPPORTED_ENGINE', 'adapter does not expose VACUUM INTO');
+      throw new BackupError(
+        'UNSUPPORTED_ENGINE',
+        'adapter does not expose VACUUM INTO',
+      );
     }
 
     const dir = resolve(options.destinationDir ?? this.options.backupDir);
     mkdirSync(dir, { recursive: true });
     const now = this.options.clock.now();
     const createdAt = toCanonicalTimestamp(now);
-    const stamp = createdAt.replace(/[-:]/g, '').replace('T', '-').replace(/\..+$/, '');
+    const stamp = createdAt
+      .replace(/[-:]/g, '')
+      .replace('T', '-')
+      .replace(/\..+$/, '');
     const schemaVersion = this.readUserVersion(this.db);
     const device = this.options.deviceId.slice(0, 8);
     const label = options.label?.trim()
-      ? `-${options.label.trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40)}`
+      ? `-${options.label
+          .trim()
+          .replace(/[^a-zA-Z0-9_-]/g, '_')
+          .slice(0, 40)}`
       : '';
     const fileName = `lawo-v${schemaVersion}-${stamp}-${device}${label}.sqlite`;
     const finalPath = join(dir, fileName);
     if (existsSync(finalPath)) {
-      throw new BackupError('BACKUP_FAILED', 'backup file already exists; refusing to overwrite', {
-        path: finalPath,
-      });
+      throw new BackupError(
+        'BACKUP_FAILED',
+        'backup file already exists; refusing to overwrite',
+        {
+          path: finalPath,
+        },
+      );
     }
     const tempPath = `${finalPath}.tmp-${newId().slice(0, 8)}`;
 
     try {
       vacuum.call(this.db, tempPath);
       // Record backup provenance inside the copy only.
-      const copy = new DatabaseSync(tempPath, { enableForeignKeyConstraints: true });
+      const copy = new DatabaseSync(tempPath, {
+        enableForeignKeyConstraints: true,
+      });
       try {
         const meta = (key: string, value: string): void => {
           copy
@@ -135,10 +158,15 @@ export class BackupManager {
         meta('backup.origin_device_id', this.options.deviceId);
         meta('backup.attachments_included', '0');
         meta('backup.label', options.label?.trim() ?? '');
-        const check = copy.prepare('PRAGMA integrity_check').all() as Array<{ integrity_check: string }>;
+        const check = copy.prepare('PRAGMA integrity_check').all() as Array<{
+          integrity_check: string;
+        }>;
         const integrity = check.map((row) => row.integrity_check).join('; ');
         if (integrity !== 'ok') {
-          throw new BackupError('BACKUP_CORRUPT', `backup copy failed integrity_check: ${integrity}`);
+          throw new BackupError(
+            'BACKUP_CORRUPT',
+            `backup copy failed integrity_check: ${integrity}`,
+          );
         }
       } finally {
         copy.close();
@@ -149,7 +177,11 @@ export class BackupManager {
       const sizeBytes = statSync(tempPath).size;
       renameSync(tempPath, finalPath);
       const checksumPath = `${finalPath}.sha256`;
-      writeFileSync(checksumPath, `${sha256}  ${basename(finalPath)}\n`, 'utf8');
+      writeFileSync(
+        checksumPath,
+        `${sha256}  ${basename(finalPath)}\n`,
+        'utf8',
+      );
       fsyncPath(checksumPath);
 
       const external = this.countExternalVersions(this.db);
@@ -181,11 +213,16 @@ export class BackupManager {
     }
   }
 
-  verify(path: string, options: { requireChecksumSidecar?: boolean } = {}): BackupVerification {
+  verify(
+    path: string,
+    options: { requireChecksumSidecar?: boolean } = {},
+  ): BackupVerification {
     const resolved = resolve(path);
     const errors: string[] = [];
     if (!existsSync(resolved)) {
-      throw new BackupError('BACKUP_FAILED', 'backup file not found', { path: resolved });
+      throw new BackupError('BACKUP_FAILED', 'backup file not found', {
+        path: resolved,
+      });
     }
     const sha256 = sha256File(resolved);
     const checksumPath = `${resolved}.sha256`;
@@ -218,19 +255,28 @@ export class BackupManager {
         readOnly: true,
         enableForeignKeyConstraints: true,
       });
-      integrity = (copy.prepare('PRAGMA integrity_check').all() as Array<{ integrity_check: string }>)
+      integrity = (
+        copy.prepare('PRAGMA integrity_check').all() as Array<{
+          integrity_check: string;
+        }>
+      )
         .map((row) => row.integrity_check)
         .join('; ');
       if (integrity !== 'ok') errors.push(`integrity_check: ${integrity}`);
       const fk = copy.prepare('PRAGMA foreign_key_check').all();
-      if (fk.length > 0) errors.push(`foreign_key_check found ${fk.length} violations`);
-      applicationId = (copy.prepare('PRAGMA application_id').get() as { application_id: number })
-        .application_id;
+      if (fk.length > 0)
+        errors.push(`foreign_key_check found ${fk.length} violations`);
+      applicationId = (
+        copy.prepare('PRAGMA application_id').get() as {
+          application_id: number;
+        }
+      ).application_id;
       if (applicationId !== LAW_OFFICE_APPLICATION_ID) {
         errors.push('file is not a law-office database');
       }
-      schemaVersion = (copy.prepare('PRAGMA user_version').get() as { user_version: number })
-        .user_version;
+      schemaVersion = (
+        copy.prepare('PRAGMA user_version').get() as { user_version: number }
+      ).user_version;
       if (schemaVersion < 1) errors.push('backup has no schema version');
       if (schemaVersion > this.options.latestSchemaVersion) {
         errors.push(
@@ -239,12 +285,18 @@ export class BackupManager {
       }
 
       const tables = new Set(
-        (copy.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-          name: string;
-        }>).map((row) => row.name),
+        (
+          copy
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .all() as Array<{
+            name: string;
+          }>
+        ).map((row) => row.name),
       );
       tablesPresent = tables.size;
-      for (const required of REQUIRED_TABLES_V1) {
+      for (const required of schemaVersion >= 2
+        ? PORTABLE_SCHEMA.tables.map((t) => t.name)
+        : REQUIRED_TABLES_V1) {
         if (!tables.has(required)) errors.push(`missing table: ${required}`);
       }
 
@@ -300,14 +352,23 @@ export class BackupManager {
     targetPath: string,
     options: { force?: boolean } = {},
   ): RestoreResult {
-    const verification = this.verify(backupPath, { requireChecksumSidecar: false });
+    const verification = this.verify(backupPath, {
+      requireChecksumSidecar: false,
+    });
     if (!verification.valid) {
-      throw new BackupError('BACKUP_CORRUPT', 'backup failed verification; restore aborted', {
-        errors: verification.errors,
-      });
+      throw new BackupError(
+        'BACKUP_CORRUPT',
+        'backup failed verification; restore aborted',
+        {
+          errors: verification.errors,
+        },
+      );
     }
     if (verification.schemaVersion === null) {
-      throw new BackupError('BACKUP_INCOMPATIBLE', 'backup schema version is unknown');
+      throw new BackupError(
+        'BACKUP_INCOMPATIBLE',
+        'backup schema version is unknown',
+      );
     }
 
     const target = resolve(targetPath);
@@ -335,17 +396,25 @@ export class BackupManager {
       fsyncPath(tempTarget);
       const restoredHash = sha256File(tempTarget);
       if (verification.sha256 !== restoredHash) {
-        throw new BackupError('RESTORE_FAILED', 'copied backup hash does not match source');
+        throw new BackupError(
+          'RESTORE_FAILED',
+          'copied backup hash does not match source',
+        );
       }
       const restoredCheck = new DatabaseSync(tempTarget, { readOnly: true });
       try {
         const integrity = (
-          restoredCheck.prepare('PRAGMA integrity_check').all() as Array<{ integrity_check: string }>
+          restoredCheck.prepare('PRAGMA integrity_check').all() as Array<{
+            integrity_check: string;
+          }>
         )
           .map((row) => row.integrity_check)
           .join('; ');
         if (integrity !== 'ok') {
-          throw new BackupError('RESTORE_FAILED', `restored copy failed integrity_check: ${integrity}`);
+          throw new BackupError(
+            'RESTORE_FAILED',
+            `restored copy failed integrity_check: ${integrity}`,
+          );
         }
       } finally {
         restoredCheck.close();
@@ -353,7 +422,8 @@ export class BackupManager {
       renameSync(tempTarget, target);
 
       const warning =
-        verification.externalFileVersions && verification.externalFileVersions > 0
+        verification.externalFileVersions &&
+        verification.externalFileVersions > 0
           ? `${verification.externalFileVersions} document versions point to external files that are not included in the database backup; restore those files separately.`
           : 'Database restored. No external attachment files were recorded as stored in this backup.';
       return {
@@ -371,12 +441,19 @@ export class BackupManager {
         // best effort
       }
       if (error instanceof BackupError) throw error;
-      throw new BackupError('RESTORE_FAILED', 'restore failed', { target }, error);
+      throw new BackupError(
+        'RESTORE_FAILED',
+        'restore failed',
+        { target },
+        error,
+      );
     }
   }
 
   private readUserVersion(db: DatabaseAdapter): number {
-    return db.get<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
+    return (
+      db.get<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0
+    );
   }
 
   private countExternalVersions(db: DatabaseAdapter): number {

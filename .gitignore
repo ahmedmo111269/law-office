@@ -8,3 +8,6 @@ backups/
 .env
 coverage/
 .DS_Store
+
+# Local agent/browser reports and disposable benchmark fixtures
+.arena/

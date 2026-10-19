@@ -44,30 +44,65 @@ export class AgendaService {
 
   async listHearings(request: TableRequest): Promise<TableResult<HearingRow>> {
     const { db, lookups } = this.deps;
-    const statusId = request.filters.status ? lookups.id('hearing_status', request.filters.status) : null;
+    const statusId = request.filters.status
+      ? lookups.id('hearing_status', request.filters.status)
+      : null;
     const period = request.filters.period ?? 'upcoming';
     const today = isoDateToday();
-    const dateFilters: Array<{ column: string; op: 'gte' | 'lte'; value: string }> = [];
+    const dateFilters: Array<{
+      column: string;
+      op: 'gte' | 'lte';
+      value: string;
+    }> = [];
     if (period === 'today') {
       const range = dayRangeIso(today);
-      dateFilters.push({ column: 'scheduled_at', op: 'gte', value: range.from }, { column: 'scheduled_at', op: 'lte', value: range.to });
+      dateFilters.push(
+        { column: 'scheduled_at', op: 'gte', value: range.from },
+        { column: 'scheduled_at', op: 'lte', value: range.to },
+      );
     } else if (period === 'week') {
-      dateFilters.push({ column: 'scheduled_at', op: 'gte', value: dayRangeIso(today).from }, { column: 'scheduled_at', op: 'lte', value: dayRangeIso(addDaysToKey(today, 7)).to });
+      dateFilters.push(
+        { column: 'scheduled_at', op: 'gte', value: dayRangeIso(today).from },
+        {
+          column: 'scheduled_at',
+          op: 'lte',
+          value: dayRangeIso(addDaysToKey(today, 7)).to,
+        },
+      );
     } else if (period === 'month') {
-      dateFilters.push({ column: 'scheduled_at', op: 'gte', value: dayRangeIso(today).from }, { column: 'scheduled_at', op: 'lte', value: dayRangeIso(addDaysToKey(today, 30)).to });
+      dateFilters.push(
+        { column: 'scheduled_at', op: 'gte', value: dayRangeIso(today).from },
+        {
+          column: 'scheduled_at',
+          op: 'lte',
+          value: dayRangeIso(addDaysToKey(today, 30)).to,
+        },
+      );
     } else if (period === 'past') {
-      dateFilters.push({ column: 'scheduled_at', op: 'lte', value: new Date().toISOString() });
+      dateFilters.push({
+        column: 'scheduled_at',
+        op: 'lte',
+        value: new Date().toISOString(),
+      });
     } else if (period === 'all') {
       // no range
     } else {
-      dateFilters.push({ column: 'scheduled_at', op: 'gte', value: new Date().toISOString() });
+      dateFilters.push({
+        column: 'scheduled_at',
+        op: 'gte',
+        value: new Date().toISOString(),
+      });
     }
     let caseIds: string[] | null = null;
     if (request.search.trim()) {
       caseIds = [];
       let offset = 0;
       for (;;) {
-        const page = await db.searchPage(request.search.trim(), { entityType: 'legal_case', limit: 200, offset });
+        const page = await db.searchPage(request.search.trim(), {
+          entityType: 'legal_case',
+          limit: 200,
+          offset,
+        });
         caseIds.push(...page.hits.map((hit) => hit.entityId));
         offset += page.hits.length;
         if (page.hits.length === 0 || offset >= page.total) break;
@@ -78,8 +113,12 @@ export class AgendaService {
     const page = await db.query('hearing', {
       filters: [
         ...dateFilters,
-        ...(statusId ? [{ column: 'status_id', op: 'eq' as const, value: statusId }] : []),
-        ...(caseIds ? [{ column: 'case_id', op: 'in' as const, value: caseIds }] : []),
+        ...(statusId
+          ? [{ column: 'status_id', op: 'eq' as const, value: statusId }]
+          : []),
+        ...(caseIds
+          ? [{ column: 'case_id', op: 'in' as const, value: caseIds }]
+          : []),
       ],
       orderBy: [{ column: 'scheduled_at', direction }],
       ...paginate(request.page, request.pageSize),
@@ -92,18 +131,29 @@ export class AgendaService {
     const rows: HearingRow[] = [];
     for (const hearing of hearings) {
       const legalCase = await cache.get('legal_case', String(hearing.case_id));
-      const court = await cache.get('court', hearing.court_id ? String(hearing.court_id) : (legalCase?.court_id ? String(legalCase.court_id) : null));
+      const court = await cache.get(
+        'court',
+        hearing.court_id
+          ? String(hearing.court_id)
+          : legalCase?.court_id
+            ? String(legalCase.court_id)
+            : null,
+      );
       const status = lookups.byId(String(hearing.status_id ?? ''));
       rows.push({
         hearing,
-        caseLabel: legalCase ? `قضية ${legalCase.case_number} / ${legalCase.case_year}` : '—',
+        caseLabel: legalCase
+          ? `قضية ${legalCase.case_number} / ${legalCase.case_year}`
+          : '—',
         caseNumber: legalCase ? String(legalCase.case_number) : '—',
         caseYear: legalCase ? Number(legalCase.case_year) : 0,
         courtName: court ? String(court.name) : '—',
         purposeName: lookups.byId(String(hearing.purpose ?? ''))?.nameAr ?? '—',
         statusName: status?.nameAr ?? '—',
         statusCode: status?.code ?? '',
-        clientNames: legalCase ? await clientNamesForCase(db, cache, String(legalCase.id)) : [],
+        clientNames: legalCase
+          ? await clientNamesForCase(db, cache, String(legalCase.id))
+          : [],
       });
     }
     void lookups;
@@ -143,22 +193,37 @@ export class AgendaService {
     return (await this.enrichHearings([hearing]))[0] ?? null;
   }
 
-  async recordHearing(hearingId: string, input: { statusCode: string; outcomeSummary?: string; heldAt?: string }): Promise<void> {
+  async recordHearing(
+    hearingId: string,
+    input: { statusCode: string; outcomeSummary?: string; heldAt?: string },
+  ): Promise<void> {
     await this.deps.db.recordHearing(hearingId, {
       statusCode: input.statusCode,
-      ...(input.outcomeSummary !== undefined ? { outcomeSummary: input.outcomeSummary } : {}),
+      ...(input.outcomeSummary !== undefined
+        ? { outcomeSummary: input.outcomeSummary }
+        : {}),
       ...(input.heldAt ? { heldAt: input.heldAt } : {}),
     });
     this.deps.cache.invalidate();
   }
 
-  async scheduleNext(hearingId: string, scheduledAt: string): Promise<EngineRow> {
-    const next = await this.deps.db.scheduleNextHearing(hearingId, { scheduledAt });
+  async scheduleNext(
+    hearingId: string,
+    scheduledAt: string,
+  ): Promise<EngineRow> {
+    const next = await this.deps.db.scheduleNextHearing(hearingId, {
+      scheduledAt,
+    });
     this.deps.cache.invalidate();
     return next;
   }
 
-  async schedule(input: { caseId: string; scheduledAt: string; purposeCode?: string; courtId?: string }): Promise<EngineRow> {
+  async schedule(input: {
+    caseId: string;
+    scheduledAt: string;
+    purposeCode?: string;
+    courtId?: string;
+  }): Promise<EngineRow> {
     const hearing = await this.deps.db.scheduleHearing(input);
     this.deps.cache.invalidate();
     return hearing;
@@ -168,36 +233,71 @@ export class AgendaService {
   // Appointments
   // ------------------------------------------------------------------
 
-  async listAppointments(request: TableRequest): Promise<TableResult<AppointmentRow>> {
+  async listAppointments(
+    request: TableRequest,
+  ): Promise<TableResult<AppointmentRow>> {
     const { db, lookups } = this.deps;
-    const statusId = request.filters.status ? lookups.id('appointment_status', request.filters.status) : null;
+    const statusId = request.filters.status
+      ? lookups.id('appointment_status', request.filters.status)
+      : null;
     const period = request.filters.period ?? 'upcoming';
     const filters = [
-      ...(statusId ? [{ column: 'status_id', op: 'eq' as const, value: statusId }] : []),
+      ...(statusId
+        ? [{ column: 'status_id', op: 'eq' as const, value: statusId }]
+        : []),
       ...(period === 'today'
         ? [
-            { column: 'start_at', op: 'gte' as const, value: dayRangeIso(isoDateToday()).from },
-            { column: 'start_at', op: 'lte' as const, value: dayRangeIso(isoDateToday()).to },
+            {
+              column: 'start_at',
+              op: 'gte' as const,
+              value: dayRangeIso(isoDateToday()).from,
+            },
+            {
+              column: 'start_at',
+              op: 'lte' as const,
+              value: dayRangeIso(isoDateToday()).to,
+            },
           ]
         : period === 'upcoming'
-          ? [{ column: 'start_at', op: 'gte' as const, value: new Date().toISOString() }]
+          ? [
+              {
+                column: 'start_at',
+                op: 'gte' as const,
+                value: new Date().toISOString(),
+              },
+            ]
           : period === 'past'
-            ? [{ column: 'start_at', op: 'lte' as const, value: new Date().toISOString() }]
+            ? [
+                {
+                  column: 'start_at',
+                  op: 'lte' as const,
+                  value: new Date().toISOString(),
+                },
+              ]
             : []),
     ];
     const page = await db.query('appointment', {
       filters,
-      orderBy: [{ column: 'start_at', direction: period === 'past' ? 'desc' : 'asc' }],
+      orderBy: [
+        { column: 'start_at', direction: period === 'past' ? 'desc' : 'asc' },
+      ],
       ...paginate(request.page, request.pageSize),
     });
     const rows: AppointmentRow[] = [];
     for (const appointment of page.rows) {
-      const party = await this.deps.cache.get('party', appointment.party_id ? String(appointment.party_id) : null);
-      const file = await this.deps.cache.get('case_file', appointment.file_id ? String(appointment.file_id) : null);
+      const party = await this.deps.cache.get(
+        'party',
+        appointment.party_id ? String(appointment.party_id) : null,
+      );
+      const file = await this.deps.cache.get(
+        'case_file',
+        appointment.file_id ? String(appointment.file_id) : null,
+      );
       const status = lookups.byId(String(appointment.status_id ?? ''));
       rows.push({
         appointment,
-        kindName: lookups.byId(String(appointment.kind_id ?? ''))?.nameAr ?? '—',
+        kindName:
+          lookups.byId(String(appointment.kind_id ?? ''))?.nameAr ?? '—',
         statusName: status?.nameAr ?? '—',
         statusCode: status?.code ?? '',
         partyName: party ? String(party.display_name) : null,
@@ -216,14 +316,23 @@ export class AgendaService {
     partyId?: string;
     fileId?: string;
     caseId?: string;
+    stageId?: string;
     notes?: string;
     allDay?: boolean;
   }): Promise<EngineRow> {
-    if (!input.title.trim()) throw new ValidationError('appointment title is required');
+    if (!input.title.trim())
+      throw new ValidationError('appointment title is required');
     const timezone = this.deps.lookups ? undefined : undefined;
+    const stage = input.stageId
+      ? await this.deps.db.require('procedural_stage', input.stageId)
+      : null;
     const appointment = await this.deps.db.insert('appointment', {
       title: input.title.trim(),
-      kind_id: this.deps.lookups.id('appointment_kind', input.kindCode ?? 'meeting'),
+      stage_id: input.stageId ?? null,
+      kind_id: this.deps.lookups.id(
+        'appointment_kind',
+        input.kindCode ?? 'meeting',
+      ),
       status_id: this.deps.lookups.id('appointment_status', 'scheduled'),
       start_at: input.startAt,
       end_at: input.endAt ?? null,
@@ -231,8 +340,8 @@ export class AgendaService {
       timezone: timezone ?? 'Africa/Cairo',
       location: input.location?.trim() || null,
       party_id: input.partyId ?? null,
-      file_id: input.fileId ?? null,
-      case_id: input.caseId ?? null,
+      file_id: input.fileId ?? stage?.file_id ?? null,
+      case_id: input.caseId ?? stage?.case_id ?? null,
       task_id: null,
       notes: input.notes?.trim() || null,
     });
@@ -261,23 +370,39 @@ export class AgendaService {
   // Announcements / service of process
   // ------------------------------------------------------------------
 
-  async listAnnouncements(request: TableRequest): Promise<TableResult<AnnouncementRow>> {
+  async listAnnouncements(
+    request: TableRequest,
+  ): Promise<TableResult<AnnouncementRow>> {
     const { db, lookups } = this.deps;
-    const statusId = request.filters.status ? lookups.id('announcement_status', request.filters.status) : null;
+    const statusId = request.filters.status
+      ? lookups.id('announcement_status', request.filters.status)
+      : null;
     const page = await db.query('announcement', {
-      filters: statusId ? [{ column: 'status_id', op: 'eq', value: statusId }] : [],
+      filters: statusId
+        ? [{ column: 'status_id', op: 'eq', value: statusId }]
+        : [],
       orderBy: [{ column: 'created_at', direction: 'desc' }],
       ...paginate(request.page, request.pageSize),
     });
     const rows: AnnouncementRow[] = [];
     for (const announcement of page.rows) {
-      const recipient = await this.deps.cache.get('party', announcement.recipient_party_id ? String(announcement.recipient_party_id) : null);
-      const task = await this.deps.cache.get('task', announcement.task_id ? String(announcement.task_id) : null);
+      const recipient = await this.deps.cache.get(
+        'party',
+        announcement.recipient_party_id
+          ? String(announcement.recipient_party_id)
+          : null,
+      );
+      const task = await this.deps.cache.get(
+        'task',
+        announcement.task_id ? String(announcement.task_id) : null,
+      );
       const status = lookups.byId(String(announcement.status_id ?? ''));
       rows.push({
         announcement,
-        kindName: lookups.byId(String(announcement.kind_id ?? ''))?.nameAr ?? '—',
-        methodName: lookups.byId(String(announcement.method_id ?? ''))?.nameAr ?? '—',
+        kindName:
+          lookups.byId(String(announcement.kind_id ?? ''))?.nameAr ?? '—',
+        methodName:
+          lookups.byId(String(announcement.method_id ?? ''))?.nameAr ?? '—',
         statusName: status?.nameAr ?? '—',
         statusCode: status?.code ?? '',
         recipientName: recipient ? String(recipient.display_name) : null,
@@ -299,20 +424,33 @@ export class AgendaService {
   }): Promise<EngineRow> {
     const announcement = await this.deps.db.insert('announcement', {
       task_id: input.taskId ?? null,
-      kind_id: this.deps.lookups.id('announcement_kind', input.kindCode ?? 'initial'),
+      kind_id: this.deps.lookups.id(
+        'announcement_kind',
+        input.kindCode ?? 'initial',
+      ),
       recipient_party_id: input.recipientPartyId ?? null,
-      method_id: this.deps.lookups.id('announcement_method', input.methodCode ?? 'bailiff'),
+      method_id: this.deps.lookups.id(
+        'announcement_method',
+        input.methodCode ?? 'bailiff',
+      ),
       served_on: input.servedOn ?? null,
       publication: input.publication?.trim() || null,
       proof_document_id: null,
-      status_id: this.deps.lookups.id('announcement_status', input.statusCode ?? 'pending'),
+      status_id: this.deps.lookups.id(
+        'announcement_status',
+        input.statusCode ?? 'pending',
+      ),
       notes: input.notes?.trim() || null,
     });
     this.deps.cache.invalidate();
     return announcement;
   }
 
-  async setAnnouncementStatus(id: string, statusCode: string, servedOn?: string): Promise<void> {
+  async setAnnouncementStatus(
+    id: string,
+    statusCode: string,
+    servedOn?: string,
+  ): Promise<void> {
     await this.deps.db.update('announcement', id, {
       status_id: this.deps.lookups.id('announcement_status', statusCode),
       ...(servedOn ? { served_on: servedOn } : {}),

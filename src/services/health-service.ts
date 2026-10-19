@@ -1,3 +1,6 @@
+import { assertCaseIntegritySync } from '../cases/integrity.ts';
+import type { EngineRow } from '../portable/store.ts';
+import { PORTABLE_SCHEMA } from '../schema/current.ts';
 import type { DatabaseAdapter, SqlRow } from '../db/adapter.ts';
 import { AppError } from '../errors.ts';
 import {
@@ -14,6 +17,7 @@ export interface SchemaCheckReport {
   readonly quickCheck: string;
   readonly foreignKeyViolations: ReadonlyArray<SqlRow>;
   readonly missingTables: readonly string[];
+  readonly caseIntegrityViolations: readonly string[];
   readonly missingIndexes: readonly string[];
   readonly missingTriggers: readonly string[];
   readonly presentTables: number;
@@ -47,31 +51,99 @@ export class HealthService {
   }
 
   schemaCheck(): SchemaCheckReport {
-    const presentTables = this.names("SELECT name FROM sqlite_master WHERE type = 'table'");
-    const presentIndexes = this.names("SELECT name FROM sqlite_master WHERE type = 'index'");
-    const presentTriggers = this.names("SELECT name FROM sqlite_master WHERE type = 'trigger'");
+    const presentTables = this.names(
+      "SELECT name FROM sqlite_master WHERE type = 'table'",
+    );
+    const presentIndexes = this.names(
+      "SELECT name FROM sqlite_master WHERE type = 'index'",
+    );
+    const presentTriggers = this.names(
+      "SELECT name FROM sqlite_master WHERE type = 'trigger'",
+    );
 
-    const missingTables = REQUIRED_TABLES_V1.filter((name) => !presentTables.has(name));
-    const missingIndexes = REQUIRED_INDEXES_V1.filter((name) => !presentIndexes.has(name));
-    const missingTriggers = REQUIRED_TRIGGERS_V1.filter((name) => !presentTriggers.has(name));
+    const version =
+      this.db.get<{ user_version: number }>('PRAGMA user_version')
+        ?.user_version ?? 0;
+    const requiredTables =
+      version >= 2
+        ? PORTABLE_SCHEMA.tables.map((t) => t.name)
+        : REQUIRED_TABLES_V1;
+    const requiredIndexes =
+      version >= 2
+        ? PORTABLE_SCHEMA.tables
+            .flatMap((t) => t.indexes.map((i) => i.name))
+            .filter((n) => !n.startsWith('sqlite_autoindex'))
+        : REQUIRED_INDEXES_V1;
+    const missingTables = requiredTables.filter(
+      (name) => !presentTables.has(name),
+    );
+    const missingIndexes = requiredIndexes.filter(
+      (name) => !presentIndexes.has(name),
+    );
+    const missingTriggers = REQUIRED_TRIGGERS_V1.filter(
+      (name) => !presentTriggers.has(name),
+    );
 
-    const integrityRows = this.db.query<{ integrity_check: string }>('PRAGMA integrity_check');
-    const integrity = integrityRows.map((row) => row.integrity_check).join('; ');
-    const quickRows = this.db.query<{ quick_check: string }>('PRAGMA quick_check');
+    const integrityRows = this.db.query<{ integrity_check: string }>(
+      'PRAGMA integrity_check',
+    );
+    const integrity = integrityRows
+      .map((row) => row.integrity_check)
+      .join('; ');
+    const quickRows = this.db.query<{ quick_check: string }>(
+      'PRAGMA quick_check',
+    );
     const quickCheck = quickRows.map((row) => row.quick_check).join('; ');
-    const foreignKeyViolations = this.db.query<SqlRow>('PRAGMA foreign_key_check');
+    const foreignKeyViolations = this.db.query<SqlRow>(
+      'PRAGMA foreign_key_check',
+    );
     const schemaVersion =
-      this.db.get<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0;
+      this.db.get<{ user_version: number }>('PRAGMA user_version')
+        ?.user_version ?? 0;
     const applicationId =
-      this.db.get<{ application_id: number }>('PRAGMA application_id')?.application_id ?? 0;
+      this.db.get<{ application_id: number }>('PRAGMA application_id')
+        ?.application_id ?? 0;
     const ftsIndexPresent = presentTables.has('search_fts');
+
+    const caseIntegrityViolations: string[] = [];
+    if (version >= 2 && missingTables.length === 0) {
+      for (const [table, predicate] of [
+        ['lookup_item', 'parent_id IS NOT NULL'],
+        ['court', 'parent_id IS NOT NULL'],
+        ['case_file', 'subtype_id IS NOT NULL OR nature_id IS NOT NULL'],
+        ['procedural_stage', '1=1'],
+        ['legal_case_link', '1=1'],
+        ['case_file_party', 'case_id IS NOT NULL'],
+        ['case_term', 'case_id IS NOT NULL'],
+        ['document_link', 'stage_id IS NOT NULL'],
+        ['task', 'stage_id IS NOT NULL'],
+        ['appointment', 'stage_id IS NOT NULL'],
+        ['legal_case', 'circuit_id IS NOT NULL'],
+        ['hearing', 'circuit_id IS NOT NULL'],
+      ] as const) {
+        for (const row of this.db.query<EngineRow>(
+          `SELECT * FROM ${table} WHERE deleted_at IS NULL AND (${predicate})`,
+        )) {
+          try {
+            assertCaseIntegritySync(this.db, table, row);
+          } catch (error) {
+            caseIntegrityViolations.push(
+              `${table}:${String(row.id)}: ${(error as Error).message}`,
+            );
+          }
+          if (caseIntegrityViolations.length >= 50) break;
+        }
+        if (caseIntegrityViolations.length >= 50) break;
+      }
+    }
 
     const ok =
       missingTables.length === 0 &&
       missingIndexes.length === 0 &&
       missingTriggers.length === 0 &&
       integrity === 'ok' &&
-      foreignKeyViolations.length === 0;
+      foreignKeyViolations.length === 0 &&
+      caseIntegrityViolations.length === 0;
 
     return {
       ok,
@@ -80,6 +152,7 @@ export class HealthService {
       integrity,
       quickCheck,
       foreignKeyViolations,
+      caseIntegrityViolations,
       missingTables,
       missingIndexes,
       missingTriggers,
@@ -97,6 +170,7 @@ export class HealthService {
         missingIndexes: report.missingIndexes,
         missingTriggers: report.missingTriggers,
         integrity: report.integrity,
+        caseIntegrityViolations: report.caseIntegrityViolations,
         foreignKeyViolations: report.foreignKeyViolations,
       });
     }
@@ -111,10 +185,13 @@ export class HealthService {
 
   stats(): DatabaseStats {
     const count = (table: string, where = ''): number =>
-      this.db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM "${table}" ${where}`)?.c ?? 0;
+      this.db.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM "${table}" ${where}`,
+      )?.c ?? 0;
     return {
       schemaVersion:
-        this.db.get<{ user_version: number }>('PRAGMA user_version')?.user_version ?? 0,
+        this.db.get<{ user_version: number }>('PRAGMA user_version')
+          ?.user_version ?? 0,
       parties: count('party', 'WHERE deleted_at IS NULL'),
       clients:
         this.db.get<{ c: number }>(
@@ -141,7 +218,9 @@ export class HealthService {
 
   private detectFts5(): boolean {
     try {
-      this.db.exec('CREATE VIRTUAL TABLE temp.__health_fts_probe USING fts5(x)');
+      this.db.exec(
+        'CREATE VIRTUAL TABLE temp.__health_fts_probe USING fts5(x)',
+      );
       this.db.exec('DROP TABLE temp.__health_fts_probe');
       return true;
     } catch {

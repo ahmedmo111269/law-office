@@ -1,0 +1,215 @@
+{
+  "engine": "indexeddb",
+  "cases": 10000,
+  "expectedListTotal": 10001,
+  "bulkFixtureMs": 16291.6,
+  "method": "Synthetic legacy-like profiles, bulk transaction seeding (not 100k audited UI creates), 20% party links, 25% stages and terms, no attachments. List operations use real CaseService + store, cold record cache per sample.",
+  "listFirst25": {
+    "samplesMs": [
+      220.7,
+      146.6,
+      139.2
+    ],
+    "medianMs": 146.6,
+    "io": {
+      "queryCalls": 5,
+      "scanBatches": 2,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 10001
+  },
+  "listPage100": {
+    "samplesMs": [
+      201.7,
+      213.5,
+      174.6
+    ],
+    "medianMs": 201.7,
+    "io": {
+      "queryCalls": 5,
+      "scanBatches": 2,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 10001
+  },
+  "arabicNormalizedText": {
+    "samplesMs": [
+      317.7,
+      295.4,
+      245.4
+    ],
+    "medianMs": 295.4,
+    "io": {
+      "queryCalls": 5,
+      "scanBatches": 2,
+      "returnedRows": 102,
+      "maxReturnedBatch": 25,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 100
+  },
+  "typeFacet": {
+    "samplesMs": [
+      63,
+      61.5,
+      59.1
+    ],
+    "medianMs": 61.5,
+    "io": {
+      "queryCalls": 5,
+      "scanBatches": 2,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 3333
+  },
+  "subjectRelationFacet": {
+    "samplesMs": [
+      433.4
+    ],
+    "medianMs": 433.4,
+    "io": {
+      "queryCalls": 5,
+      "scanBatches": 12,
+      "returnedRows": 5082,
+      "maxReturnedBatch": 500,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 2500
+  },
+  "partyRelationFacet": {
+    "samplesMs": [
+      374.8
+    ],
+    "medianMs": 374.8,
+    "io": {
+      "queryCalls": 5,
+      "scanBatches": 7,
+      "returnedRows": 2103,
+      "maxReturnedBatch": 500,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 2001
+  },
+  "dashboardExactCounts": {
+    "samplesMs": [
+      264.3
+    ],
+    "medianMs": 264.3,
+    "io": {
+      "queryCalls": 0,
+      "scanBatches": 21,
+      "returnedRows": 10001,
+      "maxReturnedBatch": 500,
+      "transaction": {
+        "pointReads": 0,
+        "neighborReads": 0,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 0
+      }
+    },
+    "total": 10001
+  },
+  "singleIntakeEditWithIncrementalIndex": {
+    "samplesMs": [
+      23.4,
+      19.6,
+      116.7
+    ],
+    "medianMs": 23.4,
+    "io": {
+      "queryCalls": 0,
+      "scanBatches": 0,
+      "returnedRows": 0,
+      "maxReturnedBatch": 0,
+      "transaction": {
+        "pointReads": 37,
+        "neighborReads": 39,
+        "wholeTableReads": 0,
+        "derivedSearchWrites": 2
+      }
+    }
+  },
+  "storage": {
+    "engine": "indexeddb",
+    "engineVersion": "2",
+    "journalMode": "idb-transactional",
+    "foreignKeys": true,
+    "pathKind": "browser"
+  },
+  "openMs": 323.6,
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.0 Safari/537.36",
+  "logicalBackup": {
+    "ms": 2069.1,
+    "bytes": 36974627
+  },
+  "logicalVerify": {
+    "ms": 2149.8,
+    "ok": true,
+    "rows": 47724
+  },
+  "explicitCaseRebuild": {
+    "ms": 86412.5,
+    "documents": 20004,
+    "mode": "Actual Workspace.open on populated pending index; includes startup, not only the rebuild API",
+    "progressEvents": 43,
+    "lastProgress": "جارٍ تحديث الفهرس المحلي: الدعاوى 10001 / 10001. احتفظ بهذه النافذة مفتوحة؛ لا تُرسل البيانات لأي خادم.",
+    "finishedBeyondFormer20SecondLimit": true,
+    "indexVersion": "2"
+  },
+  "populatedReopen": {
+    "connectionMs": 25.9,
+    "lookupsAndFirst25Ms": 194.9,
+    "total": 10001,
+    "rows": 25,
+    "kind": "New connection and app/record caches, same process; OS/browser caches not flushed."
+  },
+  "browserStorage": {
+    "usageBytes": 28372015,
+    "quotaBytes": 10765790255
+  },
+  "environment": {
+    "date": "2026-10-19T06:29:22.071Z",
+    "node": "v22.22.3",
+    "os": "linux",
+    "cpus": 2,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "totalMemoryBytes": 4131278848
+  },
+  "totalWallMs": 112152
+}

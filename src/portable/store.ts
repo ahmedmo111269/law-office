@@ -12,20 +12,42 @@
 import type { DatabaseAdapter } from '../db/adapter.ts';
 import type { IndexedDbDatabase } from '../db/indexeddb/indexeddb-adapter.ts';
 import { AppError } from '../errors.ts';
-import { PORTABLE_SCHEMA } from '../schema/v1/portable-schema.ts';
-import { primaryKeyOf, type PortableSchema, type PortableTable } from '../schema/portable-types.ts';
+import { PORTABLE_SCHEMA } from '../schema/current.ts';
+import {
+  primaryKeyOf,
+  type PortableSchema,
+  type PortableTable,
+} from '../schema/portable-types.ts';
 import type { Row } from './expression.ts';
-import { normalizeQuery, type QueryOptions, type QueryPage } from './query.ts';
+import {
+  normalizeQuery,
+  scanKeyset,
+  type ScanOptions,
+  type QueryOptions,
+  type QueryPage,
+} from './query.ts';
 
 export type EngineRow = Record<string, string | number | null>;
 
 export interface PortableTransaction {
-  get(table: string, key: string | readonly string[]): Promise<EngineRow | undefined>;
+  get(
+    table: string,
+    key: string | readonly string[],
+  ): Promise<EngineRow | undefined>;
   getAll(table: string): Promise<EngineRow[]>;
-  getByIndex(table: string, indexName: string, value: string | number): Promise<EngineRow[]>;
+  getByIndex(
+    table: string,
+    indexName: string,
+    value: string | number,
+  ): Promise<EngineRow[]>;
   /** Equality lookup by columns; avoids depending on SQLite autoindex names. */
-  getByColumns(table: string, values: Readonly<Record<string, string | number>>): Promise<EngineRow[]>;
+  getByColumns(
+    table: string,
+    values: Readonly<Record<string, string | number>>,
+    options?: { activeOnly?: boolean },
+  ): Promise<EngineRow[]>;
   count(table: string): Promise<number>;
+  maximum(table: string, column: string): Promise<number>;
   put(table: string, row: EngineRow): Promise<void>;
   delete(table: string, key: string | readonly string[]): Promise<void>;
   clear(table: string): Promise<void>;
@@ -36,10 +58,21 @@ export interface PortableStore extends PortableTransaction {
   readonly schema: PortableSchema;
   /** Paged/filtered read that never materialises more rows than the page. */
   query(table: string, options?: QueryOptions): Promise<QueryPage>;
-  transaction<T>(tables: readonly string[], fn: (tx: PortableTransaction) => Promise<T>): Promise<T>;
+  /** Stable PK/keyset batches for internal relation expansion; no repeated COUNT per batch. */
+  scan(table: string, options?: ScanOptions): AsyncIterable<EngineRow[]>;
+  transaction<T>(
+    tables: readonly string[],
+    fn: (tx: PortableTransaction) => Promise<T>,
+  ): Promise<T>;
   exportAll(): Promise<Record<string, EngineRow[]>>;
   importAll(data: Record<string, EngineRow[]>): Promise<void>;
-  describe(): { engine: string; engineVersion: string; journalMode: string; foreignKeys: boolean; pathKind: string };
+  describe(): {
+    engine: string;
+    engineVersion: string;
+    journalMode: string;
+    foreignKeys: boolean;
+    pathKind: string;
+  };
   close(): Promise<void>;
 }
 
@@ -73,10 +106,15 @@ export class SqlitePortableStore implements PortableStore {
     this.schema = schema;
   }
 
-  async get(table: string, key: string | readonly string[]): Promise<EngineRow | undefined> {
+  async get(
+    table: string,
+    key: string | readonly string[],
+  ): Promise<EngineRow | undefined> {
     const def = tableDef(this.schema, table);
     const keys = Array.isArray(key) ? [...key] : [key as string];
-    const where = def.primaryKey.map((column) => `${identifier(column)} = ?`).join(' AND ');
+    const where = def.primaryKey
+      .map((column) => `${identifier(column)} = ?`)
+      .join(' AND ');
     return this.db.get<EngineRow>(
       `SELECT * FROM ${identifier(table)} WHERE ${where}`,
       keys as string[],
@@ -96,7 +134,10 @@ export class SqlitePortableStore implements PortableStore {
     const def = tableDef(this.schema, table);
     const index = def.indexes.find((candidate) => candidate.name === indexName);
     if (!index || index.columns.length === 0) {
-      throw new AppError('VALIDATION_FAILED', `unknown index ${indexName} on ${table}`);
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown index ${indexName} on ${table}`,
+      );
     }
     return this.db.query<EngineRow>(
       `SELECT * FROM ${identifier(table)} WHERE ${identifier(index.columns[0]!)} = ?`,
@@ -107,49 +148,115 @@ export class SqlitePortableStore implements PortableStore {
   async getByColumns(
     table: string,
     values: Readonly<Record<string, string | number>>,
+    options: { activeOnly?: boolean } = {},
   ): Promise<EngineRow[]> {
-    tableDef(this.schema, table);
+    const def = tableDef(this.schema, table);
     const entries = Object.entries(values);
     if (entries.length === 0) return [];
     return this.db.query<EngineRow>(
       `SELECT * FROM ${identifier(table)} WHERE ${entries
         .map(([column]) => `${identifier(column)} = ?`)
-        .join(' AND ')}`,
+        .join(
+          ' AND ',
+        )}${options.activeOnly && def.columns.some((c) => c.name === 'deleted_at') ? ' AND deleted_at IS NULL' : ''}`,
       entries.map(([, value]) => value),
+    );
+  }
+
+  async maximum(table: string, column: string): Promise<number> {
+    const def = tableDef(this.schema, table);
+    if (!def.columns.some((c) => c.name === column))
+      throw new AppError('VALIDATION_FAILED', 'unknown maximum column');
+    return (
+      this.db.get<{ n: number }>(
+        `SELECT MAX(${identifier(column)}) AS n FROM ${identifier(table)}`,
+      )?.n ?? 0
     );
   }
 
   async count(table: string): Promise<number> {
     tableDef(this.schema, table);
-    return this.db.get<{ c: number }>(`SELECT COUNT(*) AS c FROM ${identifier(table)}`)?.c ?? 0;
+    return (
+      this.db.get<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM ${identifier(table)}`,
+      )?.c ?? 0
+    );
   }
 
   async query(table: string, options: QueryOptions = {}): Promise<QueryPage> {
     const def = tableDef(this.schema, table);
     const query = normalizeQuery(def, options);
     const where = buildWhere(query.filters);
-    const order = buildOrder(query.orderBy);
+    const order = buildOrder(query.orderBy, def);
     const total =
       this.db.get<{ c: number }>(
         `SELECT COUNT(*) AS c FROM ${identifier(table)}${where.sql}`,
         where.params,
       )?.c ?? 0;
     if (query.limit === 0) return { rows: [], total };
-    const rows = this.db.query<EngineRow>(
-      `SELECT * FROM ${identifier(table)}${where.sql}${order} LIMIT ? OFFSET ?`,
-      [...where.params, query.limit, query.offset],
-    );
+    const scopeFilter =
+      table === 'search_document' &&
+      query.orderBy[0]?.column === 'updated_at' &&
+      query.orderBy[0]?.direction === 'desc'
+        ? query.filters.find(
+            (f) =>
+              f.column === 'case_scope' &&
+              f.op === 'in' &&
+              Array.isArray(f.value),
+          )
+        : undefined;
+    const scopes = scopeFilter
+      ? [...new Set(scopeFilter.value as readonly (string | number)[])]
+      : [];
+    // A single IN over two scope prefixes needs a full temporary sort. Read
+    // only the top (offset+limit) from each disjoint indexed scope, then merge.
+    // The public total remains the exact count of the original predicate.
+    const mergeScopes =
+      scopes.length > 1 &&
+      scopes.length <= 8 &&
+      (where.params.length + 2) * scopes.length + 2 <= 30_000;
+    const sql = mergeScopes
+      ? `SELECT * FROM (${scopes.map(() => `SELECT * FROM (SELECT * FROM ${identifier(table)}${where.sql}${where.sql ? ' AND' : ' WHERE'} "case_scope" = ?${order} LIMIT ?)`).join(' UNION ALL ')})${order} LIMIT ? OFFSET ?`
+      : `SELECT * FROM ${identifier(table)}${where.sql}${order} LIMIT ? OFFSET ?`;
+    const params = mergeScopes
+      ? scopes.flatMap((scope) => [
+          ...where.params,
+          scope,
+          query.offset + query.limit,
+        ])
+      : [...where.params];
+    const rows = this.db.query<EngineRow>(sql, [
+      ...params,
+      query.limit,
+      query.offset,
+    ]);
     return { rows, total };
+  }
+
+  scan(table: string, options: ScanOptions = {}): AsyncIterable<EngineRow[]> {
+    const def = tableDef(this.schema, table);
+    return scanKeyset(def, options, async (query) => {
+      const where = buildWhere(query.filters);
+      return this.db.query<EngineRow>(
+        `SELECT * FROM ${identifier(table)}${where.sql}${buildOrder(query.orderBy, def)} LIMIT ? OFFSET ?`,
+        [...where.params, query.limit, query.offset],
+      );
+    });
   }
 
   async put(table: string, row: EngineRow): Promise<void> {
     const def = tableDef(this.schema, table);
-    const columns = def.columns.map((column) => column.name).filter((name) => name in row);
-    if (columns.length === 0) throw new AppError('VALIDATION_FAILED', 'row has no known columns');
+    const columns = def.columns
+      .map((column) => column.name)
+      .filter((name) => name in row);
+    if (columns.length === 0)
+      throw new AppError('VALIDATION_FAILED', 'row has no known columns');
     const values = columns.map((column) => row[column] ?? null);
     const updates = columns
       .filter((column) => !def.primaryKey.includes(column))
-      .map((column) => `${identifier(column)} = excluded.${identifier(column)}`);
+      .map(
+        (column) => `${identifier(column)} = excluded.${identifier(column)}`,
+      );
     const conflict = def.primaryKey.map(identifier).join(', ');
     const sql =
       `INSERT INTO ${identifier(table)} (${columns.map(identifier).join(', ')})\n` +
@@ -201,9 +308,15 @@ export class SqlitePortableStore implements PortableStore {
   }
 
   async exportAll(): Promise<Record<string, EngineRow[]>> {
-    const data: Record<string, EngineRow[]> = {};
-    for (const table of this.schema.tables) data[table.name] = await this.getAll(table.name);
-    return data;
+    return this.transaction(
+      this.schema.tables.map((t) => t.name),
+      async (tx) => {
+        const data: Record<string, EngineRow[]> = {};
+        for (const table of this.schema.tables)
+          data[table.name] = await tx.getAll(table.name);
+        return data;
+      },
+    );
   }
 
   /**
@@ -217,24 +330,33 @@ export class SqlitePortableStore implements PortableStore {
    */
   async importAll(data: Record<string, EngineRow[]>): Promise<void> {
     if (this.depth > 0) {
-      throw new AppError('INVALID_STATE', 'restore cannot run inside another transaction');
+      throw new AppError(
+        'INVALID_STATE',
+        'restore cannot run inside another transaction',
+      );
     }
     const triggers = this.db.query<{ name: string; sql: string }>(
       "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL",
     );
     const hasFts = Boolean(
-      this.db.get<{ name: string }>("SELECT name FROM sqlite_master WHERE name = 'search_fts'"),
+      this.db.get<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE name = 'search_fts'",
+      ),
     );
     this.db.exec('PRAGMA foreign_keys = OFF');
     try {
       this.db.exec('BEGIN IMMEDIATE');
-      for (const trigger of triggers) this.db.exec(`DROP TRIGGER ${identifier(trigger.name)}`);
-      for (const table of this.schema.tables) this.db.exec(`DELETE FROM ${identifier(table.name)}`);
+      for (const trigger of triggers)
+        this.db.exec(`DROP TRIGGER ${identifier(trigger.name)}`);
+      for (const table of this.schema.tables)
+        this.db.exec(`DELETE FROM ${identifier(table.name)}`);
       for (const tableName of dependencyOrder(this.schema.tables)) {
         const rows = data[tableName];
         if (!rows) continue;
         for (const row of rows) {
-          const table = this.schema.tables.find((candidate) => candidate.name === tableName)!;
+          const table = this.schema.tables.find(
+            (candidate) => candidate.name === tableName,
+          )!;
           const columns = table.columns
             .map((column) => column.name)
             .filter((column) => column in row);
@@ -250,11 +372,17 @@ export class SqlitePortableStore implements PortableStore {
       if (hasFts) {
         this.db.exec("INSERT INTO search_fts(search_fts) VALUES('rebuild')");
       }
-      const violations = this.db.query<Record<string, string | number>>('PRAGMA foreign_key_check');
+      const violations = this.db.query<Record<string, string | number>>(
+        'PRAGMA foreign_key_check',
+      );
       if (violations.length > 0) {
-        throw new AppError('RESTORE_FAILED', 'restored data has foreign key violations', {
-          violations: violations.slice(0, 20),
-        });
+        throw new AppError(
+          'RESTORE_FAILED',
+          'restored data has foreign key violations',
+          {
+            violations: violations.slice(0, 20),
+          },
+        );
       }
       this.db.exec('COMMIT');
     } catch (error) {
@@ -269,7 +397,13 @@ export class SqlitePortableStore implements PortableStore {
     }
   }
 
-  describe(): { engine: string; engineVersion: string; journalMode: string; foreignKeys: boolean; pathKind: string } {
+  describe(): {
+    engine: string;
+    engineVersion: string;
+    journalMode: string;
+    foreignKeys: boolean;
+    pathKind: string;
+  } {
     return this.db.describe();
   }
 
@@ -290,7 +424,10 @@ export class IndexedDbStore implements PortableStore {
     this.schema = db.schema;
   }
 
-  get(table: string, key: string | readonly string[]): Promise<EngineRow | undefined> {
+  get(
+    table: string,
+    key: string | readonly string[],
+  ): Promise<EngineRow | undefined> {
     return this.db.get(table, key);
   }
 
@@ -298,23 +435,39 @@ export class IndexedDbStore implements PortableStore {
     return this.db.getAll(table);
   }
 
-  getByIndex(table: string, indexName: string, value: string | number): Promise<EngineRow[]> {
+  getByIndex(
+    table: string,
+    indexName: string,
+    value: string | number,
+  ): Promise<EngineRow[]> {
     return this.db.getByIndex(table, indexName, value);
   }
 
   getByColumns(
     table: string,
     values: Readonly<Record<string, string | number>>,
+    options: { activeOnly?: boolean } = {},
   ): Promise<EngineRow[]> {
-    return this.db.getByColumns(table, values);
+    return this.db
+      .getByColumns(table, values)
+      .then((rows) =>
+        options.activeOnly ? rows.filter((r) => r.deleted_at === null) : rows,
+      );
   }
 
   count(table: string): Promise<number> {
     return this.db.count(table);
   }
+  maximum(table: string, column: string): Promise<number> {
+    return this.db.maximum(table, column);
+  }
 
   query(table: string, options: QueryOptions = {}): Promise<QueryPage> {
     return this.db.queryRows(table, options);
+  }
+
+  scan(table: string, options: ScanOptions = {}): AsyncIterable<EngineRow[]> {
+    return this.db.scanRows(table, options);
   }
 
   put(table: string, row: EngineRow): Promise<void> {
@@ -338,8 +491,14 @@ export class IndexedDbStore implements PortableStore {
         get: (table, key) => tx.get(table, key),
         getAll: (table) => tx.getAll(table),
         getByIndex: (table, index, value) => tx.getByIndex(table, index, value),
-        getByColumns: (table, values) => tx.getByColumns(table, values),
+        getByColumns: async (table, values, options) => {
+          const rows = await tx.getByColumns(table, values);
+          return options?.activeOnly
+            ? rows.filter((r) => r.deleted_at === null)
+            : rows;
+        },
         count: (table) => tx.count(table),
+        maximum: (table, column) => tx.maximum(table, column),
         put: (table, row) => tx.put(table, row),
         delete: (table, key) => tx.delete(table, key),
         clear: (table) => tx.clear(table),
@@ -349,9 +508,15 @@ export class IndexedDbStore implements PortableStore {
   }
 
   async exportAll(): Promise<Record<string, EngineRow[]>> {
-    const data: Record<string, EngineRow[]> = {};
-    for (const table of this.schema.tables) data[table.name] = await this.getAll(table.name);
-    return data;
+    return this.transaction(
+      this.schema.tables.map((t) => t.name),
+      async (tx) => {
+        const data: Record<string, EngineRow[]> = {};
+        for (const table of this.schema.tables)
+          data[table.name] = await tx.getAll(table.name);
+        return data;
+      },
+    );
   }
 
   /**
@@ -377,7 +542,13 @@ export class IndexedDbStore implements PortableStore {
     );
   }
 
-  describe(): { engine: string; engineVersion: string; journalMode: string; foreignKeys: boolean; pathKind: string } {
+  describe(): {
+    engine: string;
+    engineVersion: string;
+    journalMode: string;
+    foreignKeys: boolean;
+    pathKind: string;
+  } {
     return this.db.describe();
   }
 
@@ -386,7 +557,12 @@ export class IndexedDbStore implements PortableStore {
   }
 
   /** Structural verification specific to the IndexedDB engine. */
-  integrityCheck(): Promise<{ ok: boolean; errors: string[]; tables: number; indexes: number }> {
+  integrityCheck(): Promise<{
+    ok: boolean;
+    errors: string[];
+    tables: number;
+    indexes: number;
+  }> {
     return this.db.integrityCheck();
   }
 }
@@ -429,16 +605,33 @@ function buildWhere(filters: readonly import('./query.ts').QueryFilter[]): {
         const values = filter.value as readonly (string | number)[];
         if (values.length === 0) clauses.push('1 = 0');
         else {
-          clauses.push(`${column} IN (${placeholders(values.length)})`);
-          params.push(...values);
+          if (values.length > 250) {
+            clauses.push(`${column} IN (SELECT value FROM json_each(?))`);
+            params.push(JSON.stringify(values));
+          } else {
+            clauses.push(`${column} IN (${placeholders(values.length)})`);
+            params.push(...values);
+          }
         }
+        break;
+      }
+      case 'lteOrNull': {
+        clauses.push(`(${column} IS NULL OR ${column} <= ?)`);
+        params.push(filter.value as string | number);
         break;
       }
       case 'gt':
       case 'gte':
       case 'lt':
       case 'lte': {
-        const operator = filter.op === 'gt' ? '>' : filter.op === 'gte' ? '>=' : filter.op === 'lt' ? '<' : '<=';
+        const operator =
+          filter.op === 'gt'
+            ? '>'
+            : filter.op === 'gte'
+              ? '>='
+              : filter.op === 'lt'
+                ? '<'
+                : '<=';
         clauses.push(`${column} ${operator} ?`);
         params.push(filter.value as string | number);
         break;
@@ -452,18 +645,28 @@ function buildWhere(filters: readonly import('./query.ts').QueryFilter[]): {
         params.push(`${escapeLike(String(filter.value))}%`);
         break;
       default:
-        throw new AppError('VALIDATION_FAILED', `unsupported filter ${String(filter.op)}`);
+        throw new AppError(
+          'VALIDATION_FAILED',
+          `unsupported filter ${String(filter.op)}`,
+        );
     }
   }
   return { sql: ` WHERE ${clauses.join(' AND ')}`, params };
 }
 
-function buildOrder(orderBy: readonly import('./query.ts').QueryOrder[]): string {
+function buildOrder(
+  orderBy: readonly import('./query.ts').QueryOrder[],
+  table: PortableTable,
+): string {
   if (orderBy.length === 0) return '';
   const parts = orderBy.map((order) => {
     const column = identifier(order.column);
     const direction = order.direction === 'desc' ? 'DESC' : 'ASC';
-    return `CASE WHEN ${column} IS NULL THEN 1 ELSE 0 END ASC, ${column} ${direction}`;
+    return table.columns.some(
+      (c) => c.name === order.column && (c.notNull || c.primaryKeyOrder > 0),
+    )
+      ? `${column} ${direction}`
+      : `CASE WHEN ${column} IS NULL THEN 1 ELSE 0 END ASC, ${column} ${direction}`;
   });
   return ` ORDER BY ${parts.join(', ')}`;
 }
@@ -480,7 +683,8 @@ function dependencyOrder(tables: readonly PortableTable[]): string[] {
     const table = byName.get(name);
     for (const foreignKey of table?.foreignKeys ?? []) {
       if (foreignKey.referencedTable === name) continue;
-      if (byName.has(foreignKey.referencedTable)) visit(foreignKey.referencedTable);
+      if (byName.has(foreignKey.referencedTable))
+        visit(foreignKey.referencedTable);
     }
     state.set(name, 'done');
     ordered.push(name);
@@ -494,6 +698,9 @@ export function keyColumns(table: PortableTable): readonly string[] {
 }
 
 export function rowKey(table: PortableTable, row: Row): string {
-  if (table.primaryKey.length === 1) return String(row[primaryKeyOf(table)] ?? '');
-  return table.primaryKey.map((column) => String(row[column] ?? '')).join('\u0000');
+  if (table.primaryKey.length === 1)
+    return String(row[primaryKeyOf(table)] ?? '');
+  return table.primaryKey
+    .map((column) => String(row[column] ?? ''))
+    .join('\u0000');
 }

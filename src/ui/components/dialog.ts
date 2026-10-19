@@ -27,16 +27,23 @@ let openCount = 0;
 
 export function openDialog(options: DialogOptions): DialogHandle {
   const dismissible = options.dismissible ?? true;
-  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const previousFocus =
+    document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
   const titleId = `dialog-title-${Math.random().toString(36).slice(2)}`;
   const descriptionId = `dialog-desc-${Math.random().toString(36).slice(2)}`;
 
-  const closeButton = h('button', {
-    class: 'icon-btn dialog__close',
-    type: 'button',
-    attrs: { 'aria-label': 'إغلاق' },
-    on: { click: () => close() },
-  }, icon('close', 18));
+  const closeButton = h(
+    'button',
+    {
+      class: 'icon-btn dialog__close',
+      type: 'button',
+      attrs: { 'aria-label': 'إغلاق' },
+      on: { click: () => close() },
+    },
+    icon('close', 18),
+  );
 
   const panel = h(
     'section',
@@ -52,41 +59,67 @@ export function openDialog(options: DialogOptions): DialogHandle {
     h(
       'header',
       { class: 'dialog__header' },
-      options.iconName ? h('span', { class: 'dialog__icon' }, icon(options.iconName, 22)) : null,
+      options.iconName
+        ? h('span', { class: 'dialog__icon' }, icon(options.iconName, 22))
+        : null,
       h(
         'div',
         { class: 'dialog__heading' },
         h('h2', { id: titleId, class: 'dialog__title', text: options.title }),
         options.description
-          ? h('p', { id: descriptionId, class: 'dialog__description', text: options.description })
+          ? h('p', {
+              id: descriptionId,
+              class: 'dialog__description',
+              text: options.description,
+            })
           : null,
       ),
       dismissible ? closeButton : null,
     ),
     h('div', { class: 'dialog__content' }, options.content),
-    options.footer ? h('footer', { class: 'dialog__footer' }, options.footer) : null,
+    options.footer
+      ? h('footer', { class: 'dialog__footer' }, options.footer)
+      : null,
   );
 
-  const backdrop = h('div', {
-    class: 'dialog-backdrop',
-    on: {
-      mousedown: (event) => {
-        if (event.target === backdrop && dismissible) close();
+  const backdrop = h(
+    'div',
+    {
+      class: 'dialog-backdrop',
+      on: {
+        mousedown: (event) => {
+          if (event.target === backdrop && dismissible) close();
+        },
       },
     },
-  }, panel);
+    panel,
+  );
 
   let open = true;
   const previouslyFocused = previousFocus;
   const onKeyDown = (event: KeyboardEvent): void => {
+    if (
+      !backdrop.classList.contains('is-open') ||
+      [...document.querySelectorAll('.dialog-backdrop.is-open')].at(-1) !==
+        backdrop ||
+      document.querySelector('.menu')
+    )
+      return;
     if (event.key === 'Escape' && dismissible) {
       event.preventDefault();
+      event.stopImmediatePropagation();
       close();
       return;
     }
     if (event.key !== 'Tab') return;
-    const focusable = panel.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    const focusable = [
+      ...panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      ),
+    ].filter(
+      (el) =>
+        el.getClientRects().length > 0 &&
+        getComputedStyle(el).visibility !== 'hidden',
     );
     if (focusable.length === 0) return;
     const first = focusable[0]!;
@@ -109,8 +142,14 @@ export function openDialog(options: DialogOptions): DialogHandle {
     backdrop.classList.add('is-open');
     const target =
       options.initialFocus ??
-      panel.querySelector<HTMLElement>('.dialog__content input:not([type="hidden"]):not([disabled]), .dialog__content select:not([disabled]), .dialog__content textarea:not([disabled])') ??
-      panel.querySelector<HTMLElement>('.dialog__content button, .btn--primary') ??
+      [
+        ...panel.querySelectorAll<HTMLElement>(
+          '.dialog__content input:not([type="hidden"]):not([disabled]), .dialog__content select:not([disabled]), .dialog__content textarea:not([disabled])',
+        ),
+      ].find((el) => el.getClientRects().length > 0) ??
+      panel.querySelector<HTMLElement>(
+        '.dialog__content button, .btn--primary',
+      ) ??
       panel.querySelector<HTMLElement>('button');
     target?.focus();
   });
@@ -136,7 +175,8 @@ export function openDialog(options: DialogOptions): DialogHandle {
     setBusy: (busy: boolean) => {
       panel.classList.toggle('is-busy', busy);
       panel.setAttribute('aria-busy', busy ? 'true' : 'false');
-      for (const button of panel.querySelectorAll<HTMLButtonElement>('button')) button.disabled = busy;
+      for (const button of panel.querySelectorAll<HTMLButtonElement>('button'))
+        button.disabled = busy;
     },
     isOpen: () => open,
   };
@@ -185,9 +225,13 @@ export function confirmDialog(options: {
     ...(options.message ? { description: options.message } : {}),
     iconName: options.danger ? 'alert' : 'info',
     size: 'sm',
-    content: h('div', { class: 'confirm-body' },
+    content: h(
+      'div',
+      { class: 'confirm-body' },
       h('p', { class: 'confirm-body__text', text: options.message }),
-      options.detail ? h('p', { class: 'muted small', text: options.detail }) : null,
+      options.detail
+        ? h('p', { class: 'muted small', text: options.detail })
+        : null,
     ),
     footer: h('div', { class: 'dialog__actions' }, cancel, confirm),
   });
@@ -207,16 +251,33 @@ export function promptDialog(options: {
     class: 'input',
     type: 'text',
     value: options.value ?? '',
-    attrs: { 'aria-label': options.label, placeholder: options.placeholder ?? '', maxlength: 60 },
+    attrs: {
+      'aria-label': options.label,
+      placeholder: options.placeholder ?? '',
+      maxlength: 60,
+    },
   });
-  const form = h('form', { class: 'form-stack' },
-    h('label', { class: 'field' },
+  const form = h(
+    'form',
+    { class: 'form-stack' },
+    h(
+      'label',
+      { class: 'field' },
       h('span', { class: 'field__label', text: options.label }),
       input,
     ),
   );
-  const cancel = h('button', { class: 'btn btn--ghost', type: 'button', text: 'إلغاء', on: { click: () => handle.close() } });
-  const submit = h('button', { class: 'btn btn--primary', type: 'submit', text: options.confirmLabel ?? 'حفظ' });
+  const cancel = h('button', {
+    class: 'btn btn--ghost',
+    type: 'button',
+    text: 'إلغاء',
+    on: { click: () => handle.close() },
+  });
+  const submit = h('button', {
+    class: 'btn btn--primary',
+    type: 'submit',
+    text: options.confirmLabel ?? 'حفظ',
+  });
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const value = input.value.trim();

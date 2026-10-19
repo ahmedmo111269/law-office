@@ -51,7 +51,10 @@ function value(row: SqlRow | undefined, key: string): string | null {
   return String(raw);
 }
 
-function joinNonEmpty(parts: ReadonlyArray<string | null | undefined>, separator = '\n'): string {
+function joinNonEmpty(
+  parts: ReadonlyArray<string | null | undefined>,
+  separator = '\n',
+): string {
   return parts
     .map((part) => part?.trim())
     .filter((part): part is string => Boolean(part && part.length > 0))
@@ -87,7 +90,9 @@ export class SearchService implements SearchIndexPort {
 
     if (available) {
       const hadTable =
-        this.db.get("SELECT name FROM sqlite_master WHERE name = 'search_fts'") !== undefined;
+        this.db.get(
+          "SELECT name FROM sqlite_master WHERE name = 'search_fts'",
+        ) !== undefined;
       this.db.exec(SEARCH_FTS_DDL);
       if (!hadTable) {
         // External-content index can be rebuilt from the canonical search docs.
@@ -104,7 +109,11 @@ export class SearchService implements SearchIndexPort {
     }
   }
 
-  handleEntityChange(tx: DatabaseAdapter, entityType: string, entityId: string): void {
+  handleEntityChange(
+    tx: DatabaseAdapter,
+    entityType: string,
+    entityId: string,
+  ): void {
     if (INDEXED_TYPES.has(entityType)) {
       this.refreshOne(tx, entityType, entityId);
       this.refreshDependents(tx, entityType, entityId);
@@ -115,12 +124,16 @@ export class SearchService implements SearchIndexPort {
 
   search(query: string, options: SearchOptions = {}): SearchHit[] {
     const normalized = normalizeArabic(query);
-    const tokens = [...new Set(normalized.split(/\s+/).filter(Boolean))].slice(0, 20);
+    const tokens = [...new Set(normalized.split(/\s+/).filter(Boolean))].slice(
+      0,
+      20,
+    );
     if (tokens.length === 0) return [];
 
     const limit = Math.trunc(options.limit ?? 20);
     const offset = Math.trunc(options.offset ?? 0);
-    if (limit <= 0) throw new ValidationError('limit must be greater than zero');
+    if (limit <= 0)
+      throw new ValidationError('limit must be greater than zero');
     if (offset < 0) throw new ValidationError('offset must not be negative');
 
     if (this.ftsAvailable && this.hasFtsTable()) {
@@ -214,6 +227,8 @@ export class SearchService implements SearchIndexPort {
 
     let documents = 0;
     this.db.transaction((tx) => {
+      tx.run("DELETE FROM app_meta WHERE key='sequence.search_document'");
+      tx.run("UPDATE app_meta SET value='0' WHERE key='cases.index_version'");
       tx.exec('DELETE FROM search_document');
       for (const entityType of INDEXED_TYPES) {
         const table = tableForType(entityType);
@@ -255,10 +270,17 @@ export class SearchService implements SearchIndexPort {
   }
 
   count(): number {
-    return this.db.get<{ c: number }>('SELECT COUNT(*) AS c FROM search_document')?.c ?? 0;
+    return (
+      this.db.get<{ c: number }>('SELECT COUNT(*) AS c FROM search_document')
+        ?.c ?? 0
+    );
   }
 
-  private refreshOne(tx: DatabaseAdapter, entityType: string, entityId: string): void {
+  private refreshOne(
+    tx: DatabaseAdapter,
+    entityType: string,
+    entityId: string,
+  ): void {
     const table = tableForType(entityType);
     if (!table) {
       this.deleteDocument(tx, entityType, entityId);
@@ -280,7 +302,11 @@ export class SearchService implements SearchIndexPort {
     this.upsertDocument(tx, entityType, entityId, parts);
   }
 
-  private refreshRelated(tx: DatabaseAdapter, entityType: string, entityId: string): void {
+  private refreshRelated(
+    tx: DatabaseAdapter,
+    entityType: string,
+    entityId: string,
+  ): void {
     switch (entityType) {
       case 'person':
       case 'organization':
@@ -298,7 +324,10 @@ export class SearchService implements SearchIndexPort {
       }
       case 'party_relationship': {
         const row = this.anyRow(tx, 'party_relationship', entityId);
-        for (const partyId of [value(row, 'from_party_id'), value(row, 'to_party_id')]) {
+        for (const partyId of [
+          value(row, 'from_party_id'),
+          value(row, 'to_party_id'),
+        ]) {
           if (partyId) {
             this.refreshOne(tx, 'party', partyId);
             this.refreshPartyDependents(tx, partyId);
@@ -324,14 +353,20 @@ export class SearchService implements SearchIndexPort {
       }
       case 'case_file_link': {
         const row = this.anyRow(tx, 'case_file_link', entityId);
-        for (const fileId of [value(row, 'source_file_id'), value(row, 'target_file_id')]) {
+        for (const fileId of [
+          value(row, 'source_file_id'),
+          value(row, 'target_file_id'),
+        ]) {
           if (fileId) this.refreshOne(tx, 'case_file', fileId);
         }
         return;
       }
       case 'legal_case_link': {
         const row = this.anyRow(tx, 'legal_case_link', entityId);
-        for (const caseId of [value(row, 'source_case_id'), value(row, 'target_case_id')]) {
+        for (const caseId of [
+          value(row, 'source_case_id'),
+          value(row, 'target_case_id'),
+        ]) {
           if (caseId) this.refreshOne(tx, 'legal_case', caseId);
         }
         return;
@@ -385,7 +420,11 @@ export class SearchService implements SearchIndexPort {
     }
   }
 
-  private refreshDependents(tx: DatabaseAdapter, entityType: string, entityId: string): void {
+  private refreshDependents(
+    tx: DatabaseAdapter,
+    entityType: string,
+    entityId: string,
+  ): void {
     switch (entityType) {
       case 'party':
         this.refreshPartyDependents(tx, entityId);
@@ -430,19 +469,22 @@ export class SearchService implements SearchIndexPort {
       `SELECT contract_id FROM contract_party WHERE party_id = ? AND deleted_at IS NULL`,
       [partyId],
     );
-    for (const contract of contracts) this.refreshOne(tx, 'contract', contract.contract_id);
+    for (const contract of contracts)
+      this.refreshOne(tx, 'contract', contract.contract_id);
 
     const documents = tx.query<{ id: string }>(
       `SELECT id FROM document WHERE source_party_id = ? AND deleted_at IS NULL`,
       [partyId],
     );
-    for (const document of documents) this.refreshOne(tx, 'document', document.id);
+    for (const document of documents)
+      this.refreshOne(tx, 'document', document.id);
 
     const interactions = tx.query<{ id: string }>(
       `SELECT id FROM party_interaction WHERE party_id = ? AND deleted_at IS NULL`,
       [partyId],
     );
-    for (const interaction of interactions) this.refreshOne(tx, 'party_interaction', interaction.id);
+    for (const interaction of interactions)
+      this.refreshOne(tx, 'party_interaction', interaction.id);
   }
 
   private refreshFileDependents(tx: DatabaseAdapter, fileId: string): void {
@@ -468,11 +510,18 @@ export class SearchService implements SearchIndexPort {
       'SELECT document_id FROM document_link WHERE file_id = ? AND deleted_at IS NULL',
       [fileId],
     );
-    for (const document of documents) this.refreshOne(tx, 'document', document.document_id);
+    for (const document of documents)
+      this.refreshOne(tx, 'document', document.document_id);
   }
 
   private refreshCaseDependents(tx: DatabaseAdapter, caseId: string): void {
-    for (const table of ['hearing', 'judgment', 'case_note', 'task', 'appointment']) {
+    for (const table of [
+      'hearing',
+      'judgment',
+      'case_note',
+      'task',
+      'appointment',
+    ]) {
       const rows = tx.query<{ id: string }>(
         `SELECT id FROM "${table}" WHERE case_id = ? AND deleted_at IS NULL`,
         [caseId],
@@ -571,7 +620,11 @@ export class SearchService implements SearchIndexPort {
     );
 
     const fullName = joinNonEmpty(
-      [value(row, 'first_name'), value(row, 'middle_name'), value(row, 'last_name')],
+      [
+        value(row, 'first_name'),
+        value(row, 'middle_name'),
+        value(row, 'last_name'),
+      ],
       ' ',
     );
     const title = String(row.display_name ?? fullName ?? 'طرف');
@@ -589,9 +642,19 @@ export class SearchService implements SearchIndexPort {
       value(row, 'national_id'),
       value(row, 'occupation'),
       value(row, 'notes'),
-      ...contacts.map((c) => joinNonEmpty([value(c, 'type_name'), value(c, 'value')], ': ')),
+      ...contacts.map((c) =>
+        joinNonEmpty([value(c, 'type_name'), value(c, 'value')], ': '),
+      ),
       ...addresses.map((a) =>
-        joinNonEmpty([value(a, 'governorate'), value(a, 'city'), value(a, 'district'), value(a, 'street')], ' '),
+        joinNonEmpty(
+          [
+            value(a, 'governorate'),
+            value(a, 'city'),
+            value(a, 'district'),
+            value(a, 'street'),
+          ],
+          ' ',
+        ),
       ),
       ...aliases.map((a) => a.alias),
       subtitleParts.join(' '),
@@ -649,9 +712,29 @@ export class SearchService implements SearchIndexPort {
       value(row, 'file_number'),
       value(row, 'title'),
       value(row, 'description'),
-      ...parties.map((p) => joinNonEmpty([value(p, 'display_name'), value(p, 'role_name'), value(p, 'side_name')], ' ')),
-      ...cases.map((c) => joinNonEmpty([value(c, 'case_number'), value(c, 'case_year'), value(c, 'court_name')], ' ')),
-      ...links.map((l) => joinNonEmpty([value(l, 'file_number'), value(l, 'title')], ' ')),
+      ...parties.map((p) =>
+        joinNonEmpty(
+          [
+            value(p, 'display_name'),
+            value(p, 'role_name'),
+            value(p, 'side_name'),
+          ],
+          ' ',
+        ),
+      ),
+      ...cases.map((c) =>
+        joinNonEmpty(
+          [
+            value(c, 'case_number'),
+            value(c, 'case_year'),
+            value(c, 'court_name'),
+          ],
+          ' ',
+        ),
+      ),
+      ...links.map((l) =>
+        joinNonEmpty([value(l, 'file_number'), value(l, 'title')], ' '),
+      ),
       subtitleParts.join(' '),
     ]);
     return { title, subtitle: subtitleParts.join(' · ') || null, body };
@@ -693,7 +776,11 @@ export class SearchService implements SearchIndexPort {
     );
 
     const title = `دعوى ${row.case_number}/${row.case_year}`;
-    const subtitleParts = [value(row, 'court_name'), value(row, 'type_name'), value(row, 'status_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'court_name'),
+      value(row, 'type_name'),
+      value(row, 'status_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'case_number'),
       value(row, 'case_year'),
@@ -701,9 +788,15 @@ export class SearchService implements SearchIndexPort {
       value(row, 'notes'),
       value(row, 'court_name'),
       value(row, 'circuit_name'),
-      ...files.map((f) => joinNonEmpty([value(f, 'file_number'), value(f, 'title')], ' ')),
-      ...parties.map((p) => joinNonEmpty([value(p, 'display_name'), value(p, 'role_name')], ' ')),
-      ...links.map((l) => joinNonEmpty([value(l, 'case_number'), value(l, 'case_year')], '/')),
+      ...files.map((f) =>
+        joinNonEmpty([value(f, 'file_number'), value(f, 'title')], ' '),
+      ),
+      ...parties.map((p) =>
+        joinNonEmpty([value(p, 'display_name'), value(p, 'role_name')], ' '),
+      ),
+      ...links.map((l) =>
+        joinNonEmpty([value(l, 'case_number'), value(l, 'case_year')], '/'),
+      ),
       subtitleParts.join(' '),
     ]);
     return { title, subtitle: subtitleParts.join(' · ') || null, body };
@@ -723,7 +816,10 @@ export class SearchService implements SearchIndexPort {
     );
     if (!row) return null;
     const title = `جلسة ${row.case_number}/${row.case_year} — ${row.scheduled_at}`;
-    const subtitleParts = [value(row, 'court_name'), value(row, 'status_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'court_name'),
+      value(row, 'status_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'case_number'),
       value(row, 'case_year'),
@@ -764,8 +860,13 @@ export class SearchService implements SearchIndexPort {
        WHERE l.judgment_id = ? AND l.deleted_at IS NULL`,
       [id],
     );
-    const title = `حكم ${value(row, 'judgment_number') ?? ''} — ${row.case_number}/${row.case_year}`.trim();
-    const subtitleParts = [value(row, 'court_name'), value(row, 'type_name'), value(row, 'status_name')].filter(Boolean);
+    const title =
+      `حكم ${value(row, 'judgment_number') ?? ''} — ${row.case_number}/${row.case_year}`.trim();
+    const subtitleParts = [
+      value(row, 'court_name'),
+      value(row, 'type_name'),
+      value(row, 'status_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'judgment_number'),
       value(row, 'operative_part'),
@@ -776,7 +877,10 @@ export class SearchService implements SearchIndexPort {
       value(row, 'case_number'),
       value(row, 'case_year'),
       ...appeals.map((a) =>
-        joinNonEmpty([value(a, 'appeal_type'), value(a, 'filed_on'), value(a, 'notes')], ' '),
+        joinNonEmpty(
+          [value(a, 'appeal_type'), value(a, 'filed_on'), value(a, 'notes')],
+          ' ',
+        ),
       ),
       ...files.map((f) => value(f, 'file_number')),
     ]);
@@ -815,10 +919,17 @@ export class SearchService implements SearchIndexPort {
       value(row, 'case_number'),
       subtitleParts.join(' '),
     ]);
-    return { title: String(row.title), subtitle: subtitleParts.join(' · ') || null, body };
+    return {
+      title: String(row.title),
+      subtitle: subtitleParts.join(' · ') || null,
+      body,
+    };
   }
 
-  private buildDocumentEntity(tx: DatabaseAdapter, id: string): DocumentParts | null {
+  private buildDocumentEntity(
+    tx: DatabaseAdapter,
+    id: string,
+  ): DocumentParts | null {
     const row = tx.get<SqlRow>(
       `SELECT d.*, ty.name_ar AS type_name, st.name_ar AS status_name,
               p.display_name AS source_name
@@ -848,7 +959,11 @@ export class SearchService implements SearchIndexPort {
        WHERE dl.document_id = ? AND dl.deleted_at IS NULL`,
       [id],
     );
-    const subtitleParts = [value(row, 'type_name'), value(row, 'doc_number'), value(row, 'status_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'type_name'),
+      value(row, 'doc_number'),
+      value(row, 'status_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'title'),
       value(row, 'doc_number'),
@@ -856,20 +971,29 @@ export class SearchService implements SearchIndexPort {
       value(row, 'physical_location'),
       value(row, 'external_ref'),
       value(row, 'source_name'),
-      ...versions.map((v) => joinNonEmpty([value(v, 'file_name'), value(v, 'storage_kind')], ' ')),
+      ...versions.map((v) =>
+        joinNonEmpty([value(v, 'file_name'), value(v, 'storage_kind')], ' '),
+      ),
       ...links.map((l) =>
-        joinNonEmpty([
-          value(l, 'file_number'),
-          value(l, 'case_number'),
-          value(l, 'contract_number'),
-          value(l, 'poa_number'),
-          value(l, 'party_name'),
-          value(l, 'task_title'),
-        ], ' '),
+        joinNonEmpty(
+          [
+            value(l, 'file_number'),
+            value(l, 'case_number'),
+            value(l, 'contract_number'),
+            value(l, 'poa_number'),
+            value(l, 'party_name'),
+            value(l, 'task_title'),
+          ],
+          ' ',
+        ),
       ),
       subtitleParts.join(' '),
     ]);
-    return { title: String(row.title), subtitle: subtitleParts.join(' · ') || null, body };
+    return {
+      title: String(row.title),
+      subtitle: subtitleParts.join(' · ') || null,
+      body,
+    };
   }
 
   private buildContract(tx: DatabaseAdapter, id: string): DocumentParts | null {
@@ -890,17 +1014,26 @@ export class SearchService implements SearchIndexPort {
        WHERE cp.contract_id = ? AND cp.deleted_at IS NULL`,
       [id],
     );
-    const subtitleParts = [value(row, 'type_name'), value(row, 'status_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'type_name'),
+      value(row, 'status_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'contract_number'),
       value(row, 'title'),
       value(row, 'terms_summary'),
       value(row, 'notes'),
       value(row, 'file_number'),
-      ...parties.map((p) => joinNonEmpty([value(p, 'display_name'), value(p, 'role_name')], ' ')),
+      ...parties.map((p) =>
+        joinNonEmpty([value(p, 'display_name'), value(p, 'role_name')], ' '),
+      ),
       subtitleParts.join(' '),
     ]);
-    return { title: String(row.title), subtitle: subtitleParts.join(' · ') || null, body };
+    return {
+      title: String(row.title),
+      subtitle: subtitleParts.join(' · ') || null,
+      body,
+    };
   }
 
   private buildPoa(tx: DatabaseAdapter, id: string): DocumentParts | null {
@@ -918,7 +1051,11 @@ export class SearchService implements SearchIndexPort {
       [id],
     );
     if (!row) return null;
-    const subtitleParts = [value(row, 'kind_name'), value(row, 'poa_number'), value(row, 'status_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'kind_name'),
+      value(row, 'poa_number'),
+      value(row, 'status_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'poa_number'),
       value(row, 'scope_text'),
@@ -936,7 +1073,10 @@ export class SearchService implements SearchIndexPort {
     };
   }
 
-  private buildAppointment(tx: DatabaseAdapter, id: string): DocumentParts | null {
+  private buildAppointment(
+    tx: DatabaseAdapter,
+    id: string,
+  ): DocumentParts | null {
     const row = tx.get<SqlRow>(
       `SELECT a.*, k.name_ar AS kind_name, st.name_ar AS status_name,
               p.display_name AS party_name, f.file_number
@@ -949,7 +1089,11 @@ export class SearchService implements SearchIndexPort {
       [id],
     );
     if (!row) return null;
-    const subtitleParts = [value(row, 'kind_name'), value(row, 'start_at'), value(row, 'party_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'kind_name'),
+      value(row, 'start_at'),
+      value(row, 'party_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'title'),
       value(row, 'location'),
@@ -958,7 +1102,11 @@ export class SearchService implements SearchIndexPort {
       value(row, 'file_number'),
       subtitleParts.join(' '),
     ]);
-    return { title: String(row.title), subtitle: subtitleParts.join(' · ') || null, body };
+    return {
+      title: String(row.title),
+      subtitle: subtitleParts.join(' · ') || null,
+      body,
+    };
   }
 
   private buildCaseNote(tx: DatabaseAdapter, id: string): DocumentParts | null {
@@ -972,7 +1120,11 @@ export class SearchService implements SearchIndexPort {
     return {
       title: `ملاحظة — ${row.file_number}`,
       subtitle: value(row, 'file_title'),
-      body: buildSearchBody([value(row, 'body'), value(row, 'file_number'), value(row, 'file_title')]),
+      body: buildSearchBody([
+        value(row, 'body'),
+        value(row, 'file_number'),
+        value(row, 'file_title'),
+      ]),
     };
   }
 
@@ -990,7 +1142,10 @@ export class SearchService implements SearchIndexPort {
       'SELECT name FROM court_circuit WHERE court_id = ? AND deleted_at IS NULL',
       [id],
     );
-    const subtitleParts = [value(row, 'kind_name'), value(row, 'governorate_name')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'kind_name'),
+      value(row, 'governorate_name'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'name'),
       value(row, 'address'),
@@ -998,10 +1153,17 @@ export class SearchService implements SearchIndexPort {
       ...circuits.map((c) => c.name),
       subtitleParts.join(' '),
     ]);
-    return { title: String(row.name), subtitle: subtitleParts.join(' · ') || null, body };
+    return {
+      title: String(row.name),
+      subtitle: subtitleParts.join(' · ') || null,
+      body,
+    };
   }
 
-  private buildInteraction(tx: DatabaseAdapter, id: string): DocumentParts | null {
+  private buildInteraction(
+    tx: DatabaseAdapter,
+    id: string,
+  ): DocumentParts | null {
     const row = tx.get<SqlRow>(
       `SELECT i.*, p.display_name, ch.name_ar AS channel_name
        FROM party_interaction i
@@ -1011,14 +1173,22 @@ export class SearchService implements SearchIndexPort {
       [id],
     );
     if (!row) return null;
-    const subtitleParts = [value(row, 'display_name'), value(row, 'channel_name'), value(row, 'occurred_at')].filter(Boolean);
+    const subtitleParts = [
+      value(row, 'display_name'),
+      value(row, 'channel_name'),
+      value(row, 'occurred_at'),
+    ].filter(Boolean);
     const body = buildSearchBody([
       value(row, 'summary'),
       value(row, 'details'),
       value(row, 'display_name'),
       value(row, 'channel_name'),
     ]);
-    return { title: String(row.summary), subtitle: subtitleParts.join(' · ') || null, body };
+    return {
+      title: String(row.summary),
+      subtitle: subtitleParts.join(' · ') || null,
+      body,
+    };
   }
 
   private upsertDocument(
@@ -1038,36 +1208,66 @@ export class SearchService implements SearchIndexPort {
         `UPDATE search_document
          SET title = ?, subtitle = ?, body = ?, normalized_text = ?, updated_at = ?
          WHERE id = ?`,
-        [parts.title, parts.subtitle, parts.body, normalized, updatedAt, existing.id],
+        [
+          parts.title,
+          parts.subtitle,
+          parts.body,
+          normalized,
+          updatedAt,
+          existing.id,
+        ],
       );
     } else {
       tx.run(
         `INSERT INTO search_document
           (entity_type, entity_id, title, subtitle, body, normalized_text, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [entityType, entityId, parts.title, parts.subtitle, parts.body, normalized, updatedAt],
+        [
+          entityType,
+          entityId,
+          parts.title,
+          parts.subtitle,
+          parts.body,
+          normalized,
+          updatedAt,
+        ],
       );
     }
   }
 
-  private deleteDocument(tx: DatabaseAdapter, entityType: string, entityId: string): void {
-    tx.run('DELETE FROM search_document WHERE entity_type = ? AND entity_id = ?', [
-      entityType,
-      entityId,
-    ]);
+  private deleteDocument(
+    tx: DatabaseAdapter,
+    entityType: string,
+    entityId: string,
+  ): void {
+    tx.run(
+      'DELETE FROM search_document WHERE entity_type = ? AND entity_id = ?',
+      [entityType, entityId],
+    );
   }
 
-  private anyRow(tx: DatabaseAdapter, table: string | undefined, id: string): SqlRow | undefined {
+  private anyRow(
+    tx: DatabaseAdapter,
+    table: string | undefined,
+    id: string,
+  ): SqlRow | undefined {
     if (!table) return undefined;
     return tx.get<SqlRow>(`SELECT * FROM "${table}" WHERE id = ?`, [id]);
   }
 
   private hasFtsTable(): boolean {
-    return this.db.get("SELECT name FROM sqlite_master WHERE name = 'search_fts'") !== undefined;
+    return (
+      this.db.get(
+        "SELECT name FROM sqlite_master WHERE name = 'search_fts'",
+      ) !== undefined
+    );
   }
 
   private readMeta(key: string): string | undefined {
-    return this.db.get<{ value: string }>('SELECT value FROM app_meta WHERE key = ?', [key])?.value;
+    return this.db.get<{ value: string }>(
+      'SELECT value FROM app_meta WHERE key = ?',
+      [key],
+    )?.value;
   }
 
   private setMeta(key: string, value: string): void {

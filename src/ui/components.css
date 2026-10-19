@@ -1101,3 +1101,47 @@ input[type='range'].input { padding: 0; block-size: 28px; accent-color: var(--pr
 @media (max-width: 900px) {
   .form-grid--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); }
 }
+
+/* Case intake — the existing parchment/ink identity, functional RTL layout. */
+.case-intake { display: grid; gap: var(--sp-4); min-inline-size: 0; }
+.case-intake__layout { display: grid; grid-template-columns: 176px minmax(0, 1fr); align-items: start; gap: var(--sp-5); }
+.case-intake__nav { position: sticky; inset-block-start: 0; display: grid; gap: 4px; padding-block: 4px; }
+.case-intake__nav-item { text-align: start; border: 0; border-inline-start: 2px solid var(--border); background: transparent; color: var(--text-2); padding: 10px 12px; font-size: var(--fs-xs); line-height: 1.65; cursor: pointer; min-block-size: 44px; border-radius: var(--r-1); }
+.case-intake__nav-item:hover, .case-intake__nav-item:focus-visible { color: var(--primary); background: var(--primary-soft); border-inline-start-color: var(--primary); }
+.case-intake__sections, .case-intake__specialized { display: grid; gap: var(--sp-4); min-inline-size: 0; }
+.intake-section { min-inline-size: 0; border: 1px solid var(--border); border-radius: var(--r-2); background: var(--surface); scroll-margin-block: 12px; }
+.intake-section > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 14px 16px; min-block-size: 48px; cursor: pointer; list-style: none; font-size: var(--fs-sm); font-weight: 600; background: var(--surface-2); border-radius: var(--r-2); }
+.intake-section > summary::-webkit-details-marker { display: none; }
+.intake-section[open] > summary { border-block-end: 1px solid var(--border); border-end-start-radius: 0; border-end-end-radius: 0; }
+.intake-section__marker { color: var(--text-3); display: inline-flex; }
+.intake-section--specialized { border-inline-start: 3px solid var(--primary-border); }
+.intake-section--specialized > summary { background: var(--primary-soft); color: var(--primary-ink); }
+.intake-section__body { padding: var(--sp-4); min-inline-size: 0; overflow-wrap: anywhere; }
+.intake-section__body .stack { gap: var(--sp-4); }
+.intake-section__body input, .intake-section__body select, .intake-section__body textarea { max-inline-size: 100%; min-inline-size: 0; }
+.intake-section__body .field, .intake-section__body .picker { min-inline-size: 0; }
+.intake-party { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-1); font-size: var(--fs-sm); }
+.intake-review-link { justify-content: start; text-align: start; white-space: normal; min-block-size: 44px; }
+.procedure-graph { list-style: none; padding: 0; margin: 0; display: grid; gap: 12px; }
+.procedure-graph__node { border-inline-start: 3px solid var(--primary-border); padding: 12px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; background: var(--surface-2); border-radius: var(--r-1); min-inline-size: 0; overflow-wrap: anywhere; }
+.procedure-node { display: grid; gap: 5px; border-inline-start: 2px solid var(--border-strong); padding-inline-start: 10px; }
+.dialog--xl { max-inline-size: 1080px; inline-size: min(1080px, calc(100vw - 32px)); }
+.case-intake [hidden], .intake-section[hidden], .intake-section__body [hidden] { display: none !important; }
+@media (max-width: 767px) {
+  .case-intake__layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
+  .case-intake__nav { position: static; display: flex; flex-wrap: wrap; gap: 5px; }
+  .case-intake__nav-item { flex: 1 1 124px; padding: 8px; border: 1px solid var(--border); font-size: 11px; }
+  .intake-section > summary { padding: 12px; }
+  .intake-section__body { padding: 12px; }
+  .dialog--xl { max-inline-size: 1080px; inline-size: calc(100vw - 16px); }
+  .dialog--xl .dialog__content { padding: 12px; }
+  .dialog--xl .dialog__actions { flex-wrap: wrap; gap: 6px; }
+  .dialog--xl .dialog__footer { padding: 10px 12px; }
+  .dialog--xl .dialog__description { font-size: 11px; }
+}
+@media (max-width: 430px) {
+  .case-intake__nav { display: none; }
+  .intake-section .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .intake-section > summary .badge { max-inline-size: 100%; white-space: normal; }
+  .dialog--xl .dialog__actions > button { flex: 1 1 auto; min-block-size: 44px; }
+}

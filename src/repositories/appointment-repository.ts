@@ -1,9 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoTimestamp, toCanonicalTimestamp } from '../util/dates.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 import type { SettingsRepository } from './settings-repository.ts';
 
@@ -64,18 +68,30 @@ export class AppointmentRepository {
     partyId?: string;
     fileId?: string;
     caseId?: string;
+    stageId?: string;
     taskId?: string;
     notes?: string;
   }): AppointmentRecord {
-    if (!input.title?.trim()) throw new ValidationError('appointment title is required');
-    const startAt = toCanonicalTimestamp(assertIsoTimestamp(input.startAt, 'startAt'));
+    if (!input.title?.trim())
+      throw new ValidationError('appointment title is required');
+    const startAt = toCanonicalTimestamp(
+      assertIsoTimestamp(input.startAt, 'startAt'),
+    );
     const endAt = input.endAt
       ? toCanonicalTimestamp(assertIsoTimestamp(input.endAt, 'endAt'))
       : null;
-    if (endAt && endAt < startAt) throw new ValidationError('end time cannot precede start time');
+    if (endAt && endAt < startAt)
+      throw new ValidationError('end time cannot precede start time');
     this.validateLinks(input);
+    const stage = input.stageId
+      ? new BaseRepository(
+          this.deps,
+          getSyncEntity('procedural_stage'),
+        ).requireById(input.stageId)
+      : null;
 
     return this.appointments.insert({
+      ...(input.stageId ? { stage_id: input.stageId } : {}),
       title: input.title.trim(),
       kind_id: this.lookups.resolveOptional('appointment_kind', input.kindCode),
       status_id: this.lookups.requireItemByCode(
@@ -86,11 +102,13 @@ export class AppointmentRepository {
       start_at: startAt,
       end_at: endAt,
       all_day: input.allDay ? 1 : 0,
-      timezone: input.timezone ?? this.settings.getString('locale.timezone', 'Africa/Cairo'),
+      timezone:
+        input.timezone ??
+        this.settings.getString('locale.timezone', 'Africa/Cairo'),
       location: input.location ?? null,
       party_id: input.partyId ?? null,
-      file_id: input.fileId ?? null,
-      case_id: input.caseId ?? null,
+      file_id: input.fileId ?? stage?.file_id ?? null,
+      case_id: input.caseId ?? stage?.case_id ?? null,
       task_id: input.taskId ?? null,
       notes: input.notes ?? null,
     });
@@ -98,7 +116,10 @@ export class AppointmentRepository {
 
   setStatus(id: string, statusCode: string): AppointmentRecord {
     return this.appointments.update(id, {
-      status_id: this.lookups.requireItemByCode('appointment_status', statusCode).id,
+      status_id: this.lookups.requireItemByCode(
+        'appointment_status',
+        statusCode,
+      ).id,
     });
   }
 
@@ -126,21 +147,33 @@ export class AppointmentRepository {
          ORDER BY start_at LIMIT ?`,
         [to, from, limit],
       )
-      .map((row) => ({ ...row, id: String(row.id) })) as unknown as AppointmentRecord[];
+      .map((row) => ({
+        ...row,
+        id: String(row.id),
+      })) as unknown as AppointmentRecord[];
   }
 
-  getFull(id: string): { appointment: AppointmentRecord; parties: ReadonlyArray<SqlRow> } {
+  getFull(id: string): {
+    appointment: AppointmentRecord;
+    parties: ReadonlyArray<SqlRow>;
+  } {
     const appointment = this.appointments.requireById(id);
     const parties = appointment.party_id
-      ? this.deps.db.query<SqlRow>('SELECT id, display_name FROM party WHERE id = ?', [
-          appointment.party_id,
-        ])
+      ? this.deps.db.query<SqlRow>(
+          'SELECT id, display_name FROM party WHERE id = ?',
+          [appointment.party_id],
+        )
       : [];
     return { appointment, parties };
   }
 
-  softDelete(id: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.appointments.softDelete(id, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    id: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.appointments.softDelete(id, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restore(id: string): { batchId: string | null; restoredCount: number } {
@@ -153,16 +186,40 @@ export class AppointmentRepository {
     caseId?: string;
     taskId?: string;
   }): void {
-    if (input.partyId && !this.deps.db.get('SELECT id FROM party WHERE id = ? AND deleted_at IS NULL', [input.partyId])) {
+    if (
+      input.partyId &&
+      !this.deps.db.get(
+        'SELECT id FROM party WHERE id = ? AND deleted_at IS NULL',
+        [input.partyId],
+      )
+    ) {
       throw new NotFoundError('party', input.partyId);
     }
-    if (input.fileId && !this.deps.db.get('SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL', [input.fileId])) {
+    if (
+      input.fileId &&
+      !this.deps.db.get(
+        'SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL',
+        [input.fileId],
+      )
+    ) {
       throw new NotFoundError('case_file', input.fileId);
     }
-    if (input.caseId && !this.deps.db.get('SELECT id FROM legal_case WHERE id = ? AND deleted_at IS NULL', [input.caseId])) {
+    if (
+      input.caseId &&
+      !this.deps.db.get(
+        'SELECT id FROM legal_case WHERE id = ? AND deleted_at IS NULL',
+        [input.caseId],
+      )
+    ) {
       throw new NotFoundError('legal_case', input.caseId);
     }
-    if (input.taskId && !this.deps.db.get('SELECT id FROM task WHERE id = ? AND deleted_at IS NULL', [input.taskId])) {
+    if (
+      input.taskId &&
+      !this.deps.db.get(
+        'SELECT id FROM task WHERE id = ? AND deleted_at IS NULL',
+        [input.taskId],
+      )
+    ) {
       throw new NotFoundError('task', input.taskId);
     }
   }
@@ -182,16 +239,28 @@ export class ReminderRepository {
     remindAt: string;
     message?: string;
   }): ReminderRecord {
-    if (!input.entityType.trim()) throw new ValidationError('entity type is required');
-    if (!input.entityId.trim()) throw new ValidationError('entity id is required');
-    const remindAt = toCanonicalTimestamp(assertIsoTimestamp(input.remindAt, 'remindAt'));
+    if (!input.entityType.trim())
+      throw new ValidationError('entity type is required');
+    if (!input.entityId.trim())
+      throw new ValidationError('entity id is required');
+    const remindAt = toCanonicalTimestamp(
+      assertIsoTimestamp(input.remindAt, 'remindAt'),
+    );
     const id = randomUUID();
     const now = toCanonicalTimestamp(this.deps.clock.now());
     this.deps.db.run(
       `INSERT INTO reminder
         (id, entity_type, entity_id, remind_at, message, is_dismissed, dismissed_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?)`,
-      [id, input.entityType, input.entityId, remindAt, input.message ?? null, now, now],
+      [
+        id,
+        input.entityType,
+        input.entityId,
+        remindAt,
+        input.message ?? null,
+        now,
+        now,
+      ],
     );
     return {
       id,
@@ -214,7 +283,10 @@ export class ReminderRepository {
          ORDER BY remind_at LIMIT ?`,
         [now, limit],
       )
-      .map((row) => ({ ...row, id: String(row.id) })) as unknown as ReminderRecord[];
+      .map((row) => ({
+        ...row,
+        id: String(row.id),
+      })) as unknown as ReminderRecord[];
   }
 
   dismiss(id: string): void {
@@ -227,7 +299,12 @@ export class ReminderRepository {
 
   list(limit = 100): ReminderRecord[] {
     return this.deps.db
-      .query<SqlRow>('SELECT * FROM reminder ORDER BY remind_at LIMIT ?', [limit])
-      .map((row) => ({ ...row, id: String(row.id) })) as unknown as ReminderRecord[];
+      .query<SqlRow>('SELECT * FROM reminder ORDER BY remind_at LIMIT ?', [
+        limit,
+      ])
+      .map((row) => ({
+        ...row,
+        id: String(row.id),
+      })) as unknown as ReminderRecord[];
   }
 }

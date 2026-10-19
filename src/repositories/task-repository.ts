@@ -1,8 +1,12 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoTimestamp, toCanonicalTimestamp } from '../util/dates.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 
 export interface TaskRecord extends EntityRecord {
@@ -35,6 +39,7 @@ export interface CreateTaskInput {
   priorityCode?: string;
   fileId?: string;
   caseId?: string;
+  stageId?: string;
   hearingId?: string;
   judgmentId?: string;
   clientPartyId?: string;
@@ -55,27 +60,45 @@ export class TaskRepository {
     this.deps = deps;
     this.lookups = lookups;
     this.tasks = new BaseRepository<TaskRecord>(deps, getSyncEntity('task'));
-    this.history = new BaseRepository(deps, getSyncEntity('task_status_history'));
-    this.announcements = new BaseRepository(deps, getSyncEntity('announcement'));
+    this.history = new BaseRepository(
+      deps,
+      getSyncEntity('task_status_history'),
+    );
+    this.announcements = new BaseRepository(
+      deps,
+      getSyncEntity('announcement'),
+    );
   }
 
   create(input: CreateTaskInput): TaskRecord {
-    if (!input.title?.trim()) throw new ValidationError('task title is required');
+    if (!input.title?.trim())
+      throw new ValidationError('task title is required');
     if (input.dueAt) assertIsoTimestamp(input.dueAt, 'dueAt');
     this.validateLinks(input);
+    const stage = input.stageId
+      ? new BaseRepository(
+          this.deps,
+          getSyncEntity('procedural_stage'),
+        ).requireById(input.stageId)
+      : null;
 
     return this.tasks.insert({
       title: input.title.trim(),
+      ...(input.stageId ? { stage_id: input.stageId } : {}),
       description: input.description ?? null,
       task_type_id: this.lookups.requireItemByCode(
         'task_type',
         input.taskTypeCode ?? 'administrative',
         'task type',
       ).id,
-      status_id: this.lookups.requireItemByCode('task_status', input.statusCode ?? 'open', 'task status').id,
+      status_id: this.lookups.requireItemByCode(
+        'task_status',
+        input.statusCode ?? 'open',
+        'task status',
+      ).id,
       priority_id: this.lookups.resolveOptional('priority', input.priorityCode),
-      file_id: input.fileId ?? null,
-      case_id: input.caseId ?? null,
+      file_id: input.fileId ?? stage?.file_id ?? null,
+      case_id: input.caseId ?? stage?.case_id ?? null,
       hearing_id: input.hearingId ?? null,
       judgment_id: input.judgmentId ?? null,
       client_party_id: input.clientPartyId ?? null,
@@ -94,25 +117,37 @@ export class TaskRepository {
   changeStatus(
     taskId: string,
     statusCode: string,
-    options: { note?: string; resultSummary?: string; suspensionReason?: string } = {},
+    options: {
+      note?: string;
+      resultSummary?: string;
+      suspensionReason?: string;
+    } = {},
   ): TaskRecord {
     const task = this.tasks.requireById(taskId);
-    const nextStatus = this.lookups.requireItemByCode('task_status', statusCode, 'task status');
+    const nextStatus = this.lookups.requireItemByCode(
+      'task_status',
+      statusCode,
+      'task status',
+    );
     if (task.status_id === nextStatus.id) return task;
     const now = toCanonicalTimestamp(this.deps.clock.now());
 
     return this.deps.db.transaction(() => {
-      const update: Record<string, string | null> = { status_id: nextStatus.id };
+      const update: Record<string, string | null> = {
+        status_id: nextStatus.id,
+      };
       if (statusCode === 'completed') {
         update.completed_at = now;
         update.cancelled_at = null;
-        if (options.resultSummary !== undefined) update.result_summary = options.resultSummary;
+        if (options.resultSummary !== undefined)
+          update.result_summary = options.resultSummary;
       } else if (statusCode === 'cancelled') {
         update.cancelled_at = now;
       } else if (statusCode === 'in_progress') {
         update.started_at = task.started_at ?? now;
       } else if (statusCode === 'blocked' || statusCode === 'waiting') {
-        update.suspension_reason = options.suspensionReason ?? task.suspension_reason;
+        update.suspension_reason =
+          options.suspensionReason ?? task.suspension_reason;
       }
       if (options.resultSummary !== undefined && statusCode !== 'completed') {
         update.result_summary = options.resultSummary;
@@ -160,15 +195,26 @@ export class TaskRepository {
       }
     }
     if (input.proofDocumentId) {
-      if (!this.deps.db.get('SELECT id FROM document WHERE id = ?', [input.proofDocumentId])) {
+      if (
+        !this.deps.db.get('SELECT id FROM document WHERE id = ?', [
+          input.proofDocumentId,
+        ])
+      ) {
         throw new NotFoundError('document', input.proofDocumentId);
       }
     }
     return this.announcements.insert({
       task_id: input.taskId ?? null,
-      kind_id: this.lookups.requireItemByCode('announcement_kind', input.kindCode, 'announcement kind').id,
+      kind_id: this.lookups.requireItemByCode(
+        'announcement_kind',
+        input.kindCode,
+        'announcement kind',
+      ).id,
       recipient_party_id: input.recipientPartyId ?? null,
-      method_id: this.lookups.resolveOptional('announcement_method', input.methodCode),
+      method_id: this.lookups.resolveOptional(
+        'announcement_method',
+        input.methodCode,
+      ),
       served_on: input.servedOn ?? null,
       publication: input.publication ?? null,
       proof_document_id: input.proofDocumentId ?? null,
@@ -210,13 +256,20 @@ export class TaskRepository {
     return { task, statusHistory, announcements };
   }
 
-  listOpen(options: { assigneePartyId?: string; limit?: number } = {}): TaskRecord[] {
+  listOpen(
+    options: { assigneePartyId?: string; limit?: number } = {},
+  ): TaskRecord[] {
     const statusIds = ['open', 'in_progress', 'waiting', 'blocked'].map(
       (code) => this.lookups.requireItemByCode('task_status', code).id,
     );
-    const filters = [{ column: 'status_id', operator: 'IN' as const, value: statusIds }];
+    const filters = [
+      { column: 'status_id', operator: 'IN' as const, value: statusIds },
+    ];
     if (options.assigneePartyId) {
-      filters.push({ column: 'assignee_party_id', value: options.assigneePartyId } as never);
+      filters.push({
+        column: 'assignee_party_id',
+        value: options.assigneePartyId,
+      } as never);
     }
     return this.tasks.list({
       filters,
@@ -225,8 +278,13 @@ export class TaskRepository {
     });
   }
 
-  softDelete(taskId: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.tasks.softDelete(taskId, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    taskId: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.tasks.softDelete(taskId, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restore(taskId: string): { batchId: string | null; restoredCount: number } {
@@ -234,10 +292,22 @@ export class TaskRepository {
   }
 
   private validateLinks(input: CreateTaskInput): void {
-    if (input.fileId && !this.deps.db.get('SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL', [input.fileId])) {
+    if (
+      input.fileId &&
+      !this.deps.db.get(
+        'SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL',
+        [input.fileId],
+      )
+    ) {
       throw new NotFoundError('case_file', input.fileId);
     }
-    if (input.caseId && !this.deps.db.get('SELECT id FROM legal_case WHERE id = ? AND deleted_at IS NULL', [input.caseId])) {
+    if (
+      input.caseId &&
+      !this.deps.db.get(
+        'SELECT id FROM legal_case WHERE id = ? AND deleted_at IS NULL',
+        [input.caseId],
+      )
+    ) {
       throw new NotFoundError('legal_case', input.caseId);
     }
     if (input.hearingId) {
@@ -266,7 +336,12 @@ export class TaskRepository {
   }
 
   private requireParty(partyId: string): void {
-    if (!this.deps.db.get('SELECT id FROM party WHERE id = ? AND deleted_at IS NULL', [partyId])) {
+    if (
+      !this.deps.db.get(
+        'SELECT id FROM party WHERE id = ? AND deleted_at IS NULL',
+        [partyId],
+      )
+    ) {
       throw new NotFoundError('party', partyId);
     }
   }

@@ -1,11 +1,15 @@
 import type { DatabaseAdapter } from '../db/adapter.ts';
 import { LAW_OFFICE_APPLICATION_ID } from '../db/constants.ts';
+import { CASE_SYSTEM_MIGRATION } from '../db/migrations/0002_case_system.ts';
 import { INITIAL_MIGRATION } from '../db/migrations/0001_initial.ts';
 import { MigrationManager } from '../db/migrations/manager.ts';
 import type { MigrationStatus } from '../db/migrations/manager.ts';
 import { SqliteDatabase } from '../db/sqlite/sqlite-adapter.ts';
 import { AppError } from '../errors.ts';
-import { AppointmentRepository, ReminderRepository } from '../repositories/appointment-repository.ts';
+import {
+  AppointmentRepository,
+  ReminderRepository,
+} from '../repositories/appointment-repository.ts';
 import type { EntityRecord } from '../repositories/base-repository.ts';
 import { BaseRepository } from '../repositories/base-repository.ts';
 import { CaseFileRepository } from '../repositories/case-file-repository.ts';
@@ -27,7 +31,7 @@ import { DeviceService } from '../services/device-service.ts';
 import type { DeviceRecord } from '../services/device-service.ts';
 import { HealthService } from '../services/health-service.ts';
 import { NumberSeriesService } from '../services/number-series.ts';
-import { SYNC_ENTITY_DEFINITIONS } from '../sync/entity-registry.ts';
+import { SYNC_ENTITY_DEFINITIONS } from '../sync/current-registry.ts';
 import type { Clock } from '../util/clock.ts';
 import { SystemClock } from '../util/clock.ts';
 import { toCanonicalTimestamp } from '../util/dates.ts';
@@ -111,13 +115,21 @@ export class LawOfficeDatabase {
       deviceId: input.device.id,
       audit: this.audit,
       search: this.search,
-      repositoryFor: (entityCode: string): BaseRepository => this.repository(entityCode),
+      repositoryFor: (entityCode: string): BaseRepository =>
+        this.repository(entityCode),
     };
     this.settings = new SettingsRepository(deps);
     this.lookups = new LookupRepository(deps);
 
     const baseRepositories = new Map<string, BaseRepository>();
     for (const type of SYNC_ENTITY_DEFINITIONS) {
+      if (
+        !input.db.get(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+          [type.table],
+        )
+      )
+        continue;
       baseRepositories.set(type.code, new BaseRepository(deps, type));
     }
     // Populate before any repository can be resolved through `repositoryFor`,
@@ -126,15 +138,29 @@ export class LawOfficeDatabase {
 
     this.courts = new CourtRepository(deps, this.lookups);
     this.parties = new PartyRepository(deps, this.lookups, this.numbers);
-    this.caseFiles = new CaseFileRepository(deps, this.lookups, this.numbers, this.settings);
+    this.caseFiles = new CaseFileRepository(
+      deps,
+      this.lookups,
+      this.numbers,
+      this.settings,
+    );
     this.cases = new CaseRepository(deps, this.lookups, this.settings);
     this.hearings = new HearingRepository(deps, this.lookups, this.settings);
     this.judgments = new JudgmentRepository(deps, this.lookups);
     this.tasks = new TaskRepository(deps, this.lookups);
     this.documents = new DocumentRepository(deps, this.lookups);
     this.contracts = new ContractRepository(deps, this.lookups, this.numbers);
-    this.finance = new FinanceRepository(deps, this.lookups, this.numbers, this.settings);
-    this.appointments = new AppointmentRepository(deps, this.lookups, this.settings);
+    this.finance = new FinanceRepository(
+      deps,
+      this.lookups,
+      this.numbers,
+      this.settings,
+    );
+    this.appointments = new AppointmentRepository(
+      deps,
+      this.lookups,
+      this.settings,
+    );
     this.reminders = new ReminderRepository(deps);
     this.sync = new SyncMetadataRepository(input.db, this.clock);
     this.health = new HealthService(input.db);
@@ -143,19 +169,22 @@ export class LawOfficeDatabase {
       appVersion: input.appVersion,
       deviceId: input.device.id,
       clock: input.clock,
-      latestSchemaVersion: 1,
+      latestSchemaVersion: 2,
     });
     this.migrations = new MigrationManager(input.db, {
       clock: input.clock,
       appVersion: input.appVersion,
-      migrations: [INITIAL_MIGRATION],
+      migrations: [INITIAL_MIGRATION, CASE_SYSTEM_MIGRATION],
     });
   }
 
   repository(entityCode: string): BaseRepository {
     const found = this.repositories.get(entityCode);
     if (!found) {
-      throw new AppError('VALIDATION_FAILED', `unknown sync entity: ${entityCode}`);
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown sync entity: ${entityCode}`,
+      );
     }
     return found;
   }
@@ -177,7 +206,7 @@ export class LawOfficeDatabase {
    */
   static open(options: LawOfficeDatabaseOptions): OpenResult {
     const clock = options.clock ?? new SystemClock();
-    const appVersion = options.appVersion ?? '0.1.0';
+    const appVersion = options.appVersion ?? '0.3.0';
     const readOnly = options.readOnly ?? false;
     const sqlite = SqliteDatabase.open({
       path: options.path,
@@ -188,14 +217,35 @@ export class LawOfficeDatabase {
       const migrations = new MigrationManager(sqlite, {
         clock,
         appVersion,
-        migrations: [INITIAL_MIGRATION],
+        migrations: [INITIAL_MIGRATION, CASE_SYSTEM_MIGRATION],
+        ...(options.path !== ':memory:'
+          ? {
+              preMigrationBackup: () => {
+                const deviceId = String(
+                  sqlite.get<{ value: string }>(
+                    "SELECT value FROM app_meta WHERE key='local.device_id'",
+                  )?.value ?? 'legacy',
+                );
+                return new BackupManager(sqlite, {
+                  backupDir: options.backupDir ?? `${options.path}.backups`,
+                  appVersion,
+                  deviceId,
+                  clock,
+                  latestSchemaVersion: 2,
+                }).create({ label: 'pre-case-system-upgrade' }).path;
+              },
+            }
+          : {}),
       });
       if (options.migrateOnOpen !== false) {
         migrations.migrate();
       }
       const status = migrations.status();
       if (!status.initialised) {
-        throw new AppError('INVALID_STATE', 'database is not initialised; run migrate first');
+        throw new AppError(
+          'INVALID_STATE',
+          'database is not initialised; run migrate first',
+        );
       }
       const deviceService = new DeviceService(sqlite, clock, appVersion);
       const device = options.deviceLabel
@@ -203,9 +253,7 @@ export class LawOfficeDatabase {
         : deviceService.ensureRegistered();
       const backupDir =
         options.backupDir ??
-        (options.path === ':memory:'
-          ? ':memory:'
-          : `${options.path}.backups`);
+        (options.path === ':memory:' ? ':memory:' : `${options.path}.backups`);
       // Touch app metadata so diagnostics can correlate schema/app versions.
       sqlite.run(
         `INSERT INTO app_meta (key, value, updated_at) VALUES ('app.version', ?, ?)
@@ -228,7 +276,9 @@ export class LawOfficeDatabase {
   }
 
   /** Diagnostics for a completely empty in-memory database, used by tests/CLI. */
-  static openMemory(options: Omit<LawOfficeDatabaseOptions, 'path'> = {}): OpenResult {
+  static openMemory(
+    options: Omit<LawOfficeDatabaseOptions, 'path'> = {},
+  ): OpenResult {
     return LawOfficeDatabase.open({ ...options, path: ':memory:' });
   }
 }

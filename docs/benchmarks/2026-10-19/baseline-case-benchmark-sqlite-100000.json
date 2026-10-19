@@ -1,0 +1,134 @@
+{
+  "engine": "sqlite",
+  "cases": 100000,
+  "expectedListTotal": 100001,
+  "bulkFixtureMs": 88230.5,
+  "method": "Synthetic legacy-like profiles, bulk transaction seeding (not 100k audited UI creates), 20% party links, 25% stages and terms, no attachments. List operations use real CaseService + store, cold record cache per sample.",
+  "listFirst25": {
+    "samplesMs": [
+      192.83,
+      191.46,
+      194.87
+    ],
+    "medianMs": 192.83,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25
+    },
+    "total": 100001
+  },
+  "listPage100": {
+    "samplesMs": [
+      317.43,
+      350.73,
+      315.85
+    ],
+    "medianMs": 317.43,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25
+    },
+    "total": 100001
+  },
+  "arabicNormalizedText": {
+    "samplesMs": [
+      90.43,
+      89.9,
+      89.96
+    ],
+    "medianMs": 89.96,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 102,
+      "maxReturnedBatch": 25
+    },
+    "total": 1000
+  },
+  "typeFacet": {
+    "samplesMs": [
+      81.11,
+      80.7,
+      80.31
+    ],
+    "medianMs": 80.7,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25
+    },
+    "total": 33333
+  },
+  "subjectRelationFacet": {
+    "samplesMs": [
+      1331.6
+    ],
+    "medianMs": 1331.6,
+    "io": {
+      "serviceStoreQueries": 109,
+      "returnedRows": 50082,
+      "maxReturnedBatch": 500
+    },
+    "total": 25000
+  },
+  "dashboardExactCounts": {
+    "samplesMs": [
+      83.98
+    ],
+    "medianMs": 83.98,
+    "io": {
+      "serviceStoreQueries": 4,
+      "returnedRows": 0,
+      "maxReturnedBatch": 0
+    },
+    "total": 100001
+  },
+  "singleIntakeEditWithIncrementalIndex": {
+    "samplesMs": [
+      9.41,
+      6.67,
+      6.2
+    ],
+    "medianMs": 6.67,
+    "io": {
+      "serviceStoreQueries": 0,
+      "returnedRows": 0,
+      "maxReturnedBatch": 0
+    }
+  },
+  "storage": {
+    "engine": "sqlite",
+    "engineVersion": "3.51.3",
+    "journalMode": "wal",
+    "foreignKeys": true,
+    "pathKind": "file"
+  },
+  "openMs": 188.9,
+  "maintenance": "100k full backup/rebuild not measured in this run; 10k measured separately",
+  "sqliteQueryPlan": [
+    {
+      "id": 5,
+      "parent": 0,
+      "notused": 71,
+      "detail": "SEARCH search_document USING INDEX case_search_recent_idx (case_scope=?)"
+    },
+    {
+      "id": 69,
+      "parent": 0,
+      "notused": 0,
+      "detail": "USE TEMP B-TREE FOR ORDER BY"
+    }
+  ],
+  "nativeForeignKeys": 0,
+  "fileSizeBytes": 337625088,
+  "environment": {
+    "date": "2026-10-19T05:08:16.678Z",
+    "node": "v22.22.3",
+    "os": "linux",
+    "cpus": 2,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "totalMemoryBytes": 4131278848
+  },
+  "totalWallMs": 92243
+}

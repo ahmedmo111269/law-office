@@ -2,10 +2,14 @@ import { createHash } from 'node:crypto';
 import type { SqlRow } from '../db/adapter.ts';
 import { ConflictError, ValidationError } from '../errors.ts';
 import type { NumberSeriesService } from '../services/number-series.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoDate, toCanonicalTimestamp } from '../util/dates.ts';
 import { stableStringify } from '../util/stable.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 
 export interface PartyRecord extends EntityRecord {
@@ -100,7 +104,12 @@ export interface ClientOptions {
   notes?: string;
 }
 
-const NATIONAL_ID_TYPES = new Set(['national_id', 'passport', 'residence', 'other']);
+const NATIONAL_ID_TYPES = new Set([
+  'national_id',
+  'passport',
+  'residence',
+  'other',
+]);
 const GENDERS = new Set(['male', 'female', 'unknown']);
 
 /**
@@ -132,15 +141,33 @@ export class PartyRepository {
     this.deps = deps;
     this.lookups = lookups;
     this.numbers = numbers;
-    this.parties = new BaseRepository<PartyRecord>(deps, getSyncEntity('party'));
-    this.persons = new BaseRepository<PersonRecord>(deps, getSyncEntity('person'));
-    this.organizations = new BaseRepository<OrganizationRecord>(deps, getSyncEntity('organization'));
-    this.clients = new BaseRepository<ClientProfileRecord>(deps, getSyncEntity('client_profile'));
+    this.parties = new BaseRepository<PartyRecord>(
+      deps,
+      getSyncEntity('party'),
+    );
+    this.persons = new BaseRepository<PersonRecord>(
+      deps,
+      getSyncEntity('person'),
+    );
+    this.organizations = new BaseRepository<OrganizationRecord>(
+      deps,
+      getSyncEntity('organization'),
+    );
+    this.clients = new BaseRepository<ClientProfileRecord>(
+      deps,
+      getSyncEntity('client_profile'),
+    );
     this.contacts = new BaseRepository(deps, getSyncEntity('party_contact'));
     this.addresses = new BaseRepository(deps, getSyncEntity('party_address'));
     this.aliases = new BaseRepository(deps, getSyncEntity('party_alias'));
-    this.relationships = new BaseRepository(deps, getSyncEntity('party_relationship'));
-    this.interactions = new BaseRepository(deps, getSyncEntity('party_interaction'));
+    this.relationships = new BaseRepository(
+      deps,
+      getSyncEntity('party_relationship'),
+    );
+    this.interactions = new BaseRepository(
+      deps,
+      getSyncEntity('party_interaction'),
+    );
     this.snapshots = new BaseRepository(deps, getSyncEntity('party_snapshot'));
   }
 
@@ -150,7 +177,10 @@ export class PartyRepository {
     }
     const displayName =
       input.displayName?.trim() ||
-      [input.firstName, input.middleName, input.lastName].filter(Boolean).join(' ').trim();
+      [input.firstName, input.middleName, input.lastName]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
     const nationalId = input.nationalId?.trim() || null;
     if (nationalId) this.assertNationalIdAvailable(nationalId);
     if (input.birthDate) assertIsoDate(input.birthDate, 'birthDate');
@@ -166,7 +196,10 @@ export class PartyRepository {
       const party = this.parties.insert({
         kind: 'person',
         display_name: displayName,
-        status_id: this.lookups.resolveOptional('party_status', input.statusCode ?? 'active'),
+        status_id: this.lookups.resolveOptional(
+          'party_status',
+          input.statusCode ?? 'active',
+        ),
         notes: input.notes ?? null,
         archived_at: null,
       });
@@ -176,11 +209,15 @@ export class PartyRepository {
           middle_name: input.middleName?.trim() || null,
           last_name: input.lastName.trim(),
           national_id: nationalId,
-          national_id_type: input.nationalIdType ?? (nationalId ? 'national_id' : null),
+          national_id_type:
+            input.nationalIdType ?? (nationalId ? 'national_id' : null),
           birth_date: input.birthDate ?? null,
           gender: input.gender ?? 'unknown',
           nationality: input.nationality ?? null,
-          marital_status_id: this.lookups.resolveOptional('marital_status', input.maritalStatusCode),
+          marital_status_id: this.lookups.resolveOptional(
+            'marital_status',
+            input.maritalStatusCode,
+          ),
           occupation: input.occupation ?? null,
           death_date: input.deathDate ?? null,
         },
@@ -191,15 +228,20 @@ export class PartyRepository {
   }
 
   createOrganization(input: CreateOrganizationInput): PartyFull {
-    if (!input.legalName?.trim()) throw new ValidationError('legal name is required');
+    if (!input.legalName?.trim())
+      throw new ValidationError('legal name is required');
     const displayName = input.displayName?.trim() || input.legalName.trim();
-    if (input.establishedOn) assertIsoDate(input.establishedOn, 'establishedOn');
+    if (input.establishedOn)
+      assertIsoDate(input.establishedOn, 'establishedOn');
 
     return this.deps.db.transaction(() => {
       const party = this.parties.insert({
         kind: 'organization',
         display_name: displayName,
-        status_id: this.lookups.resolveOptional('party_status', input.statusCode ?? 'active'),
+        status_id: this.lookups.resolveOptional(
+          'party_status',
+          input.statusCode ?? 'active',
+        ),
         notes: input.notes ?? null,
         archived_at: null,
       });
@@ -207,7 +249,10 @@ export class PartyRepository {
         {
           legal_name: input.legalName.trim(),
           trade_name: input.tradeName?.trim() || null,
-          legal_form_id: this.lookups.resolveOptional('legal_form', input.legalFormCode),
+          legal_form_id: this.lookups.resolveOptional(
+            'legal_form',
+            input.legalFormCode,
+          ),
           commercial_registry_no: input.commercialRegistryNo?.trim() || null,
           tax_id: input.taxId?.trim() || null,
           established_on: input.establishedOn ?? null,
@@ -220,7 +265,10 @@ export class PartyRepository {
     });
   }
 
-  createClientPerson(input: CreatePersonInput, clientOptions: ClientOptions = {}): PartyFull {
+  createClientPerson(
+    input: CreatePersonInput,
+    clientOptions: ClientOptions = {},
+  ): PartyFull {
     return this.deps.db.transaction(() => {
       const created = this.createPerson(input);
       this.ensureClient(created.party.id, clientOptions);
@@ -239,32 +287,48 @@ export class PartyRepository {
     });
   }
 
-  ensureClient(partyId: string, options: ClientOptions = {}): ClientProfileRecord {
+  ensureClient(
+    partyId: string,
+    options: ClientOptions = {},
+  ): ClientProfileRecord {
     const party = this.parties.requireById(partyId);
     const existing = this.clients.getById(partyId, { includeDeleted: true });
     if (existing && existing.deleted_at === null) {
-      throw new ConflictError('party already has a client profile', 'ALREADY_EXISTS', {
-        partyId,
-        clientCode: existing.client_code,
-      });
+      throw new ConflictError(
+        'party already has a client profile',
+        'ALREADY_EXISTS',
+        {
+          partyId,
+          clientCode: existing.client_code,
+        },
+      );
     }
     const wasDeleted = Boolean(existing && existing.deleted_at !== null);
     if (wasDeleted) this.clients.restore(partyId);
 
-    const clientCode = options.clientCode?.trim() || this.numbers.next('client.code').formatted;
+    const clientCode =
+      options.clientCode?.trim() || this.numbers.next('client.code').formatted;
     const duplicateCode = this.clients.list({
       filters: [{ column: 'client_code', value: clientCode }],
       includeDeleted: true,
       limit: 1,
     })[0];
     if (duplicateCode && duplicateCode.id !== partyId) {
-      throw new ConflictError('client code already exists', 'ALREADY_EXISTS', { clientCode });
+      throw new ConflictError('client code already exists', 'ALREADY_EXISTS', {
+        clientCode,
+      });
     }
     const values = {
       client_code: clientCode,
       client_since: options.clientSince ?? null,
-      status_id: this.lookups.resolveOptional('client_status', options.statusCode ?? 'active'),
-      source_id: this.lookups.resolveOptional('client_source', options.sourceCode),
+      status_id: this.lookups.resolveOptional(
+        'client_status',
+        options.statusCode ?? 'active',
+      ),
+      source_id: this.lookups.resolveOptional(
+        'client_source',
+        options.sourceCode,
+      ),
       notes: options.notes ?? null,
       archived_at: null,
     };
@@ -274,13 +338,23 @@ export class PartyRepository {
 
   addContact(
     partyId: string,
-    input: { typeCode: string; value: string; label?: string; isPrimary?: boolean },
+    input: {
+      typeCode: string;
+      value: string;
+      label?: string;
+      isPrimary?: boolean;
+    },
   ): EntityRecord {
     this.parties.requireById(partyId);
-    if (!input.value?.trim()) throw new ValidationError('contact value is required');
+    if (!input.value?.trim())
+      throw new ValidationError('contact value is required');
     return this.contacts.insert({
       party_id: partyId,
-      contact_type_id: this.lookups.requireItemByCode('contact_type', input.typeCode, 'contact type').id,
+      contact_type_id: this.lookups.requireItemByCode(
+        'contact_type',
+        input.typeCode,
+        'contact type',
+      ).id,
       value: input.value.trim(),
       label: input.label ?? null,
       is_primary: input.isPrimary ? 1 : 0,
@@ -307,9 +381,15 @@ export class PartyRepository {
     this.parties.requireById(partyId);
     return this.addresses.insert({
       party_id: partyId,
-      address_type_id: this.lookups.resolveOptional('address_type', input.typeCode),
+      address_type_id: this.lookups.resolveOptional(
+        'address_type',
+        input.typeCode,
+      ),
       country: 'EG',
-      governorate_id: this.lookups.resolveOptional('governorate', input.governorateCode),
+      governorate_id: this.lookups.resolveOptional(
+        'governorate',
+        input.governorateCode,
+      ),
       city: input.city ?? null,
       district: input.district ?? null,
       street: input.street ?? null,
@@ -372,10 +452,14 @@ export class PartyRepository {
     },
   ): EntityRecord {
     this.parties.requireById(partyId);
-    if (!input.summary?.trim()) throw new ValidationError('interaction summary is required');
+    if (!input.summary?.trim())
+      throw new ValidationError('interaction summary is required');
     return this.interactions.insert({
       party_id: partyId,
-      channel_id: this.lookups.resolveOptional('interaction_channel', input.channelCode),
+      channel_id: this.lookups.resolveOptional(
+        'interaction_channel',
+        input.channelCode,
+      ),
       direction: input.direction ?? 'internal',
       occurred_at: input.occurredAt,
       summary: input.summary.trim(),
@@ -389,12 +473,15 @@ export class PartyRepository {
     const person = this.persons.getById(partyId);
     if (!person) throw new ValidationError('person not found for party');
     const update: Record<string, string | null> = {};
-    if (patch.firstName !== undefined) update.first_name = patch.firstName.trim();
-    if (patch.middleName !== undefined) update.middle_name = patch.middleName?.trim() || null;
+    if (patch.firstName !== undefined)
+      update.first_name = patch.firstName.trim();
+    if (patch.middleName !== undefined)
+      update.middle_name = patch.middleName?.trim() || null;
     if (patch.lastName !== undefined) update.last_name = patch.lastName.trim();
     if (patch.nationalId !== undefined) {
       const nationalId = patch.nationalId?.trim() || null;
-      if (nationalId && nationalId !== person.national_id) this.assertNationalIdAvailable(nationalId);
+      if (nationalId && nationalId !== person.national_id)
+        this.assertNationalIdAvailable(nationalId);
       update.national_id = nationalId;
     }
     if (patch.birthDate !== undefined) {
@@ -408,11 +495,15 @@ export class PartyRepository {
     if (patch.nationality !== undefined) update.nationality = patch.nationality;
     if (patch.occupation !== undefined) update.occupation = patch.occupation;
     if (patch.gender !== undefined) {
-      if (!GENDERS.has(patch.gender)) throw new ValidationError('invalid gender value');
+      if (!GENDERS.has(patch.gender))
+        throw new ValidationError('invalid gender value');
       update.gender = patch.gender;
     }
     if (patch.maritalStatusCode !== undefined) {
-      update.marital_status_id = this.lookups.resolveOptional('marital_status', patch.maritalStatusCode);
+      update.marital_status_id = this.lookups.resolveOptional(
+        'marital_status',
+        patch.maritalStatusCode,
+      );
     }
     if (Object.keys(update).length > 0) this.persons.update(partyId, update);
 
@@ -422,38 +513,57 @@ export class PartyRepository {
     return this.requireFull(partyId);
   }
 
-  updateOrganization(partyId: string, patch: Partial<CreateOrganizationInput>): PartyFull {
+  updateOrganization(
+    partyId: string,
+    patch: Partial<CreateOrganizationInput>,
+  ): PartyFull {
     const org = this.organizations.getById(partyId);
     if (!org) throw new ValidationError('organization not found for party');
     const update: Record<string, string | null> = {};
-    if (patch.legalName !== undefined) update.legal_name = patch.legalName.trim();
-    if (patch.tradeName !== undefined) update.trade_name = patch.tradeName?.trim() || null;
+    if (patch.legalName !== undefined)
+      update.legal_name = patch.legalName.trim();
+    if (patch.tradeName !== undefined)
+      update.trade_name = patch.tradeName?.trim() || null;
     if (patch.legalFormCode !== undefined) {
-      update.legal_form_id = this.lookups.resolveOptional('legal_form', patch.legalFormCode);
+      update.legal_form_id = this.lookups.resolveOptional(
+        'legal_form',
+        patch.legalFormCode,
+      );
     }
     if (patch.commercialRegistryNo !== undefined) {
-      update.commercial_registry_no = patch.commercialRegistryNo?.trim() || null;
+      update.commercial_registry_no =
+        patch.commercialRegistryNo?.trim() || null;
     }
     if (patch.taxId !== undefined) update.tax_id = patch.taxId?.trim() || null;
     if (patch.establishedOn !== undefined) {
-      if (patch.establishedOn) assertIsoDate(patch.establishedOn, 'establishedOn');
+      if (patch.establishedOn)
+        assertIsoDate(patch.establishedOn, 'establishedOn');
       update.established_on = patch.establishedOn ?? null;
     }
-    if (patch.registryOffice !== undefined) update.registry_office = patch.registryOffice?.trim() || null;
-    if (Object.keys(update).length > 0) this.organizations.update(partyId, update);
+    if (patch.registryOffice !== undefined)
+      update.registry_office = patch.registryOffice?.trim() || null;
+    if (Object.keys(update).length > 0)
+      this.organizations.update(partyId, update);
     if (patch.displayName !== undefined && patch.displayName.trim()) {
       this.parties.update(partyId, { display_name: patch.displayName.trim() });
     }
     return this.requireFull(partyId);
   }
 
-  updateParty(partyId: string, patch: { statusCode?: string; notes?: string; displayName?: string }): PartyRecord {
+  updateParty(
+    partyId: string,
+    patch: { statusCode?: string; notes?: string; displayName?: string },
+  ): PartyRecord {
     const update: Record<string, string | null> = {};
     if (patch.statusCode !== undefined) {
-      update.status_id = this.lookups.resolveOptional('party_status', patch.statusCode);
+      update.status_id = this.lookups.resolveOptional(
+        'party_status',
+        patch.statusCode,
+      );
     }
     if (patch.notes !== undefined) update.notes = patch.notes;
-    if (patch.displayName !== undefined) update.display_name = patch.displayName.trim();
+    if (patch.displayName !== undefined)
+      update.display_name = patch.displayName.trim();
     return Object.keys(update).length === 0
       ? this.parties.requireById(partyId)
       : this.parties.update(partyId, update);
@@ -469,7 +579,8 @@ export class PartyRepository {
     return {
       party,
       person: this.persons.getById(partyId, { includeDeleted }) ?? null,
-      organization: this.organizations.getById(partyId, { includeDeleted }) ?? null,
+      organization:
+        this.organizations.getById(partyId, { includeDeleted }) ?? null,
       client: this.clients.getById(partyId, { includeDeleted }) ?? null,
       contacts: this.contacts.list({
         filters: [{ column: 'party_id', value: partyId }],
@@ -495,7 +606,10 @@ export class PartyRepository {
     return full;
   }
 
-  findByNationalId(nationalId: string, includeDeleted = false): PartyFull | undefined {
+  findByNationalId(
+    nationalId: string,
+    includeDeleted = false,
+  ): PartyFull | undefined {
     const row = this.deps.db.get<{ party_id: string }>(
       `SELECT p.party_id FROM person p JOIN party pa ON pa.id = p.party_id
        WHERE p.national_id = ? ${includeDeleted ? '' : 'AND pa.deleted_at IS NULL'}
@@ -505,7 +619,9 @@ export class PartyRepository {
     return row ? this.getFull(row.party_id, includeDeleted) : undefined;
   }
 
-  listPersons(options: { limit?: number; offset?: number } = {}): PartyRecord[] {
+  listPersons(
+    options: { limit?: number; offset?: number } = {},
+  ): PartyRecord[] {
     return this.parties.list({
       filters: [{ column: 'kind', value: 'person' }],
       limit: options.limit ?? 50,
@@ -514,7 +630,9 @@ export class PartyRepository {
     });
   }
 
-  listClients(options: { limit?: number; offset?: number } = {}): PartyRecord[] {
+  listClients(
+    options: { limit?: number; offset?: number } = {},
+  ): PartyRecord[] {
     return this.deps.db
       .query<SqlRow>(
         `SELECT p.* FROM party p
@@ -524,7 +642,10 @@ export class PartyRepository {
          LIMIT ? OFFSET ?`,
         [options.limit ?? 50, options.offset ?? 0],
       )
-      .map((row) => ({ ...row, id: String(row.id) })) as unknown as PartyRecord[];
+      .map((row) => ({
+        ...row,
+        id: String(row.id),
+      })) as unknown as PartyRecord[];
   }
 
   /**
@@ -533,7 +654,8 @@ export class PartyRepository {
    * person into every file.
    */
   captureSnapshot(partyId: string, reason: string): EntityRecord {
-    if (!reason.trim()) throw new ValidationError('snapshot reason is required');
+    if (!reason.trim())
+      throw new ValidationError('snapshot reason is required');
     const full = this.requireFull(partyId);
     const payload = {
       party: full.party,
@@ -563,8 +685,13 @@ export class PartyRepository {
     return this.parties.unarchive(partyId);
   }
 
-  softDelete(partyId: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.parties.softDelete(partyId, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    partyId: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.parties.softDelete(partyId, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restore(partyId: string): { batchId: string | null; restoredCount: number } {
@@ -574,10 +701,14 @@ export class PartyRepository {
   private assertNationalIdAvailable(nationalId: string): void {
     const existing = this.findByNationalId(nationalId, true);
     if (existing) {
-      throw new ConflictError('national id belongs to another party', 'ALREADY_EXISTS', {
-        partyId: existing.party.id,
-        deleted: existing.party.deleted_at !== null,
-      });
+      throw new ConflictError(
+        'national id belongs to another party',
+        'ALREADY_EXISTS',
+        {
+          partyId: existing.party.id,
+          deleted: existing.party.deleted_at !== null,
+        },
+      );
     }
   }
 }

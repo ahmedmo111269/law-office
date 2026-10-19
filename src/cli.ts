@@ -14,7 +14,7 @@ import { SqliteDatabase } from './db/sqlite/sqlite-adapter.ts';
 import { AppError } from './errors.ts';
 import { SystemClock } from './util/clock.ts';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.3.0';
 const DEFAULT_DB = process.env.LAW_OFFICE_DB ?? 'data/law-office.sqlite';
 
 interface Parsed {
@@ -30,7 +30,10 @@ function parse(argv: readonly string[]): Parsed {
   for (let i = 0; i < rest.length; i += 1) {
     const arg = rest[i]!;
     if (arg.startsWith('--')) {
-      const [name, inline] = arg.slice(2).split('=', 2) as [string, string | undefined];
+      const [name, inline] = arg.slice(2).split('=', 2) as [
+        string,
+        string | undefined,
+      ];
       if (inline !== undefined) {
         flags[name] = inline;
       } else {
@@ -56,7 +59,11 @@ function dbPath(parsed: Parsed): string {
 function backupDir(parsed: Parsed): string {
   return typeof parsed.flags.dir === 'string'
     ? resolve(parsed.flags.dir)
-    : resolve(dbPath(parsed) === ':memory:' ? 'data/backups' : `${dbPath(parsed)}.backups`);
+    : resolve(
+        dbPath(parsed) === ':memory:'
+          ? 'data/backups'
+          : `${dbPath(parsed)}.backups`,
+      );
 }
 
 function print(value: unknown): void {
@@ -74,7 +81,9 @@ function open(parsed: Parsed): LawOfficeDatabase {
     path,
     appVersion: APP_VERSION,
     backupDir: backupDir(parsed),
-    ...(typeof parsed.flags.device === 'string' ? { deviceLabel: parsed.flags.device } : {}),
+    ...(typeof parsed.flags.device === 'string'
+      ? { deviceLabel: parsed.flags.device }
+      : {}),
   });
   return result.database;
 }
@@ -109,7 +118,11 @@ function cmdInit(parsed: Parsed): void {
     print({
       database: dbPath(parsed),
       createdOrOpened: true,
-      device: { id: db.device.id, code: db.device.short_code, platform: db.device.platform },
+      device: {
+        id: db.device.id,
+        code: db.device.short_code,
+        platform: db.device.platform,
+      },
       migration: db.migrations.status(),
       health,
     });
@@ -150,10 +163,14 @@ function cmdBackup(parsed: Parsed): void {
   const db = open(parsed);
   try {
     const info = db.backups.create({
-      ...(typeof parsed.flags.label === 'string' ? { label: parsed.flags.label } : {}),
+      ...(typeof parsed.flags.label === 'string'
+        ? { label: parsed.flags.label }
+        : {}),
       destinationDir: backupDir(parsed),
     });
-    const verification = db.backups.verify(info.path, { requireChecksumSidecar: true });
+    const verification = db.backups.verify(info.path, {
+      requireChecksumSidecar: true,
+    });
     print({ backup: info, verification });
     if (!verification.valid) process.exit(1);
   } finally {
@@ -206,7 +223,8 @@ function cmdBackups(parsed: Parsed): void {
 
 function cmdRestore(parsed: Parsed): void {
   const [file, target] = parsed.positionals;
-  if (!file || !target) fail('usage: restore <backup-file> <new-database-path>');
+  if (!file || !target)
+    fail('usage: restore <backup-file> <new-database-path>');
   if (resolve(target) === resolve(dbPath(parsed)) && !parsed.flags.force) {
     fail('refusing to restore over the active database without --force');
   }
@@ -233,10 +251,13 @@ function cmdSearch(parsed: Parsed): void {
   if (!text) fail('usage: search <text>');
   const db = open(parsed);
   try {
-    const limit = typeof parsed.flags.limit === 'string' ? Number(parsed.flags.limit) : 20;
+    const limit =
+      typeof parsed.flags.limit === 'string' ? Number(parsed.flags.limit) : 20;
     const hits = db.search.search(text, {
       limit: Number.isFinite(limit) && limit > 0 ? Math.min(limit, 200) : 20,
-      ...(typeof parsed.flags.type === 'string' ? { entityType: parsed.flags.type } : {}),
+      ...(typeof parsed.flags.type === 'string'
+        ? { entityType: parsed.flags.type }
+        : {}),
     });
     print({ query: text, fts5: db.search.usingFts5, hits });
   } finally {
@@ -256,7 +277,10 @@ function cmdReindex(parsed: Parsed): void {
 function cmdMigrate(parsed: Parsed): void {
   const db = open(parsed);
   try {
-    print({ migration: db.migrations.status(), history: db.migrations.appliedRows() });
+    print({
+      migration: db.migrations.status(),
+      history: db.migrations.appliedRows(),
+    });
   } finally {
     db.close();
   }
@@ -310,9 +334,12 @@ try {
 } catch (error) {
   if (error instanceof AppError) {
     process.stderr.write(`${error.code}: ${error.message}\n`);
-    if (error.details) process.stderr.write(`${JSON.stringify(error.details, null, 2)}\n`);
+    if (error.details)
+      process.stderr.write(`${JSON.stringify(error.details, null, 2)}\n`);
   } else {
-    process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
+    process.stderr.write(
+      `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+    );
   }
   process.exit(1);
 }

@@ -1,8 +1,12 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoDate } from '../util/dates.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 
 export interface JudgmentRecord extends EntityRecord {
@@ -51,8 +55,14 @@ export class JudgmentRepository {
   constructor(deps: RepositoryDependencies, lookups: LookupRepository) {
     this.deps = deps;
     this.lookups = lookups;
-    this.judgments = new BaseRepository<JudgmentRecord>(deps, getSyncEntity('judgment'));
-    this.judgmentFiles = new BaseRepository(deps, getSyncEntity('judgment_file_link'));
+    this.judgments = new BaseRepository<JudgmentRecord>(
+      deps,
+      getSyncEntity('judgment'),
+    );
+    this.judgmentFiles = new BaseRepository(
+      deps,
+      getSyncEntity('judgment_file_link'),
+    );
     this.appeals = new BaseRepository(deps, getSyncEntity('judgment_appeal'));
   }
 
@@ -60,8 +70,10 @@ export class JudgmentRepository {
     const legalCase = this.requireCase(input.caseId);
     assertIsoDate(input.issuedOn, 'issuedOn');
     if (input.depositDate) assertIsoDate(input.depositDate, 'depositDate');
-    if (input.copyReceivedOn) assertIsoDate(input.copyReceivedOn, 'copyReceivedOn');
-    if (input.userAppealDeadline) assertIsoDate(input.userAppealDeadline, 'userAppealDeadline');
+    if (input.copyReceivedOn)
+      assertIsoDate(input.copyReceivedOn, 'copyReceivedOn');
+    if (input.userAppealDeadline)
+      assertIsoDate(input.userAppealDeadline, 'userAppealDeadline');
 
     if (input.hearingId) {
       const hearing = this.deps.db.get<{ case_id: string }>(
@@ -74,7 +86,10 @@ export class JudgmentRepository {
       }
     }
     const courtId = input.courtId ?? (legalCase.court_id as string | null);
-    if (courtId && !this.deps.db.get('SELECT id FROM court WHERE id = ?', [courtId])) {
+    if (
+      courtId &&
+      !this.deps.db.get('SELECT id FROM court WHERE id = ?', [courtId])
+    ) {
       throw new NotFoundError('court', courtId);
     }
 
@@ -85,7 +100,10 @@ export class JudgmentRepository {
         court_id: courtId,
         judgment_number: input.judgmentNumber?.trim() || null,
         issued_on: input.issuedOn,
-        judgment_type_id: this.lookups.resolveOptional('judgment_type', input.judgmentTypeCode),
+        judgment_type_id: this.lookups.resolveOptional(
+          'judgment_type',
+          input.judgmentTypeCode,
+        ),
         status_id: this.lookups.requireItemByCode(
           'judgment_status',
           input.statusCode ?? 'issued',
@@ -103,10 +121,9 @@ export class JudgmentRepository {
       const fileIds =
         input.fileIds ??
         this.deps.db
-          .query<{ file_id: string }>(
-            'SELECT file_id FROM case_file_case WHERE case_id = ? AND deleted_at IS NULL',
-            [input.caseId],
-          )
+          .query<{
+            file_id: string;
+          }>('SELECT file_id FROM case_file_case WHERE case_id = ? AND deleted_at IS NULL', [input.caseId])
           .map((row) => row.file_id);
       for (const fileId of fileIds) {
         this.requireFile(fileId);
@@ -133,10 +150,14 @@ export class JudgmentRepository {
   ): EntityRecord {
     this.judgments.requireById(judgmentId);
     if (input.filedOn) assertIsoDate(input.filedOn, 'filedOn');
-    if (input.userDeadlineOn) assertIsoDate(input.userDeadlineOn, 'userDeadlineOn');
+    if (input.userDeadlineOn)
+      assertIsoDate(input.userDeadlineOn, 'userDeadlineOn');
     return this.appeals.insert({
       judgment_id: judgmentId,
-      appeal_type_id: this.lookups.requireItemByCode('appeal_type', input.appealTypeCode).id,
+      appeal_type_id: this.lookups.requireItemByCode(
+        'appeal_type',
+        input.appealTypeCode,
+      ).id,
       filed_on: input.filedOn ?? null,
       user_deadline_on: input.userDeadlineOn ?? null,
       status_id: this.lookups.requireItemByCode(
@@ -183,8 +204,13 @@ export class JudgmentRepository {
     return { judgment, files, appeals };
   }
 
-  softDelete(id: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.judgments.softDelete(id, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    id: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.judgments.softDelete(id, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restore(id: string): { batchId: string | null; restoredCount: number } {
@@ -201,7 +227,12 @@ export class JudgmentRepository {
   }
 
   private requireFile(fileId: string): void {
-    if (!this.deps.db.get('SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL', [fileId])) {
+    if (
+      !this.deps.db.get(
+        'SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL',
+        [fileId],
+      )
+    ) {
       throw new NotFoundError('case_file', fileId);
     }
   }

@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { REQUIRED_INDEXES_V1, REQUIRED_TABLES_V1, REQUIRED_TRIGGERS_V1 } from '../src/schema/v1/manifest.ts';
+import {
+  REQUIRED_INDEXES_V1,
+  REQUIRED_TABLES_V1,
+  REQUIRED_TRIGGERS_V1,
+} from '../src/schema/v1/manifest.ts';
 import { SYNC_ENTITY_DEFINITIONS } from '../src/sync/entity-registry.ts';
 import { openHarness } from './helpers.ts';
 
@@ -10,10 +14,10 @@ test('1. first-time creation initialises schema, device and search index', () =>
   try {
     const health = h.db.health.schemaCheck();
     assert.equal(health.ok, true, JSON.stringify(health));
-    assert.equal(health.schemaVersion, 1);
+    assert.equal(health.schemaVersion, 2);
     assert.equal(health.integrity, 'ok');
     assert.deepEqual(health.foreignKeyViolations, []);
-    assert.equal(h.db.migrations.currentVersion(), 1);
+    assert.equal(h.db.migrations.currentVersion(), 2);
     assert.equal(h.db.device.is_local, 1);
     assert.match(h.db.device.short_code, /^[A-Z0-9]{3,8}$/);
     assert.equal(h.db.search.usingFts5, true);
@@ -40,12 +44,23 @@ test('2. every manifest table/index/trigger exists and sync entities have delete
       const columns = h.db.db
         .query<{ name: string }>(`PRAGMA table_info("${entity.table}")`)
         .map((row) => row.name);
-      assert.ok(columns.includes(entity.primaryKeyColumn), `${entity.code} primary key`);
-      assert.ok(columns.includes('deleted_at'), `${entity.code} needs deleted_at`);
+      assert.ok(
+        columns.includes(entity.primaryKeyColumn),
+        `${entity.code} primary key`,
+      );
+      assert.ok(
+        columns.includes('deleted_at'),
+        `${entity.code} needs deleted_at`,
+      );
       assert.ok(columns.includes('revision'), `${entity.code} needs revision`);
-      assert.ok(columns.includes('sync_status'), `${entity.code} needs sync_status`);
+      assert.ok(
+        columns.includes('sync_status'),
+        `${entity.code} needs sync_status`,
+      );
     }
-    const fts = h.db.db.get("SELECT name FROM sqlite_master WHERE name = 'search_fts'");
+    const fts = h.db.db.get(
+      "SELECT name FROM sqlite_master WHERE name = 'search_fts'",
+    );
     assert.ok(fts);
   } finally {
     h.cleanup();

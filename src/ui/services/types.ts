@@ -48,7 +48,10 @@ export class RecordCache {
     return map;
   }
 
-  async get(code: string, id: string | null | undefined): Promise<EngineRow | null> {
+  async get(
+    code: string,
+    id: string | null | undefined,
+  ): Promise<EngineRow | null> {
     if (!id) return null;
     const map = this.map(code);
     if (map.has(id)) return map.get(id) ?? null;
@@ -57,7 +60,10 @@ export class RecordCache {
     return row ?? null;
   }
 
-  async many(code: string, ids: readonly (string | null | undefined)[]): Promise<Map<string, EngineRow>> {
+  async many(
+    code: string,
+    ids: readonly (string | null | undefined)[],
+  ): Promise<Map<string, EngineRow>> {
     const unique = [...new Set(ids.filter((id): id is string => Boolean(id)))];
     const result = new Map<string, EngineRow>();
     const missing: string[] = [];
@@ -67,7 +73,8 @@ export class RecordCache {
       else if (cached === undefined) missing.push(id);
     }
     const chunks: string[][] = [];
-    for (let index = 0; index < missing.length; index += 400) chunks.push(missing.slice(index, index + 400));
+    for (let index = 0; index < missing.length; index += 400)
+      chunks.push(missing.slice(index, index + 400));
     for (const chunk of chunks) {
       const page = await this.db.query(code, {
         filters: [{ column: 'id', op: 'in', value: chunk }],
@@ -110,7 +117,10 @@ export function combinedName(person: EngineRow | null | undefined): string {
     .trim();
 }
 
-export function paginate(page: number, pageSize: number): { offset: number; limit: number } {
+export function paginate(
+  page: number,
+  pageSize: number,
+): { offset: number; limit: number } {
   return { offset: Math.max(0, (page - 1) * pageSize), limit: pageSize };
 }
 
@@ -125,6 +135,17 @@ export async function eachPage(
   } = {},
 ): Promise<number> {
   const pageSize = Math.min(500, options.pageSize ?? 500);
+  if (!options.orderBy?.length) {
+    let total = 0;
+    for await (const rows of db.iterate(entityCode, {
+      pageSize,
+      ...(options.filters ? { filters: options.filters } : {}),
+    })) {
+      total += rows.length;
+      await onPage(rows);
+    }
+    return total;
+  }
   let offset = 0;
   let total = 0;
   for (;;) {
@@ -140,4 +161,25 @@ export async function eachPage(
     if (page.rows.length === 0 || offset >= page.total) break;
   }
   return total;
+}
+
+/** Collect only an entity-scoped association set, in real pages, without a silent relation cutoff. */
+export async function relatedRows(
+  db: PortableLawOffice,
+  entityCode: string,
+  options: Parameters<PortableLawOffice['query']>[1] = {},
+): Promise<{ rows: EngineRow[]; total: number }> {
+  const rows: EngineRow[] = [];
+  const total = await eachPage(
+    db,
+    entityCode,
+    (page) => {
+      rows.push(...page);
+    },
+    {
+      ...(options.filters ? { filters: options.filters } : {}),
+      ...(options.orderBy ? { orderBy: options.orderBy } : {}),
+    },
+  );
+  return { rows, total };
 }

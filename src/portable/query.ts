@@ -19,6 +19,7 @@ export type QueryOperator =
   | 'gte'
   | 'lt'
   | 'lte'
+  | 'lteOrNull'
   | 'contains'
   | 'startsWith'
   | 'isNull'
@@ -66,17 +67,34 @@ export function normalizeQuery(
   const filters = [...(options.filters ?? [])];
   for (const filter of filters) {
     if (!columns.has(filter.column)) {
-      throw new AppError('VALIDATION_FAILED', `unknown filter column ${filter.column} on ${table.name}`);
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown filter column ${filter.column} on ${table.name}`,
+      );
     }
     validateFilter(filter, table.name);
   }
   const orderBy = [...(options.orderBy ?? [])];
+  const tieDirection = orderBy[0]?.direction ?? 'asc';
+  for (const column of table.primaryKey)
+    if (!orderBy.some((o) => o.column === column))
+      orderBy.push({ column, direction: tieDirection });
   for (const order of orderBy) {
     if (!columns.has(order.column)) {
-      throw new AppError('VALIDATION_FAILED', `unknown order column ${order.column} on ${table.name}`);
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown order column ${order.column} on ${table.name}`,
+      );
     }
-    if (order.direction !== undefined && order.direction !== 'asc' && order.direction !== 'desc') {
-      throw new AppError('VALIDATION_FAILED', `invalid order direction on ${table.name}`);
+    if (
+      order.direction !== undefined &&
+      order.direction !== 'asc' &&
+      order.direction !== 'desc'
+    ) {
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `invalid order direction on ${table.name}`,
+      );
     }
   }
   const offset = Math.max(0, Math.trunc(options.offset ?? 0));
@@ -90,12 +108,18 @@ function validateFilter(filter: QueryFilter, tableName: string): void {
   if (op === 'isNull' || op === 'notNull') return;
   if (op === 'in') {
     if (!Array.isArray(value)) {
-      throw new AppError('VALIDATION_FAILED', `filter ${filter.column} on ${tableName} needs a value list`);
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `filter ${filter.column} on ${tableName} needs a value list`,
+      );
     }
     return;
   }
   if (value === undefined || value === null || Array.isArray(value)) {
-    throw new AppError('VALIDATION_FAILED', `filter ${filter.column} on ${tableName} needs a scalar value`);
+    throw new AppError(
+      'VALIDATION_FAILED',
+      `filter ${filter.column} on ${tableName} needs a scalar value`,
+    );
   }
 }
 
@@ -104,8 +128,11 @@ function asText(value: unknown): string {
   return String(value);
 }
 
+const inSets = new WeakMap<readonly QueryScalar[], Set<unknown>>();
+
 function compareScalar(left: unknown, right: QueryScalar): number {
-  if (typeof left === 'number' && typeof right === 'number') return left - right;
+  if (typeof left === 'number' && typeof right === 'number')
+    return left - right;
   const a = asText(left);
   const b = asText(right);
   if (a === b) return 0;
@@ -123,26 +150,62 @@ export function matchesFilter(row: EngineRow, filter: QueryFilter): boolean {
       return (current ?? null) === (filter.value ?? null);
     case 'neq':
       return (current ?? null) !== (filter.value ?? null);
-    case 'in':
-      return (filter.value as readonly QueryScalar[]).some((value) => (current ?? null) === value);
+    case 'in': {
+      const values = filter.value as readonly QueryScalar[];
+      let set = inSets.get(values);
+      if (!set) {
+        set = new Set(values);
+        inSets.set(values, set);
+      }
+      return set.has(current ?? null);
+    }
     case 'gt':
-      return current !== null && current !== undefined && compareScalar(current, filter.value as QueryScalar) > 0;
+      return (
+        current !== null &&
+        current !== undefined &&
+        compareScalar(current, filter.value as QueryScalar) > 0
+      );
     case 'gte':
-      return current !== null && current !== undefined && compareScalar(current, filter.value as QueryScalar) >= 0;
+      return (
+        current !== null &&
+        current !== undefined &&
+        compareScalar(current, filter.value as QueryScalar) >= 0
+      );
     case 'lt':
-      return current !== null && current !== undefined && compareScalar(current, filter.value as QueryScalar) < 0;
+      return (
+        current !== null &&
+        current !== undefined &&
+        compareScalar(current, filter.value as QueryScalar) < 0
+      );
+    case 'lteOrNull':
+      return (
+        current === null ||
+        current === undefined ||
+        compareScalar(current, filter.value as QueryScalar) <= 0
+      );
     case 'lte':
-      return current !== null && current !== undefined && compareScalar(current, filter.value as QueryScalar) <= 0;
+      return (
+        current !== null &&
+        current !== undefined &&
+        compareScalar(current, filter.value as QueryScalar) <= 0
+      );
     case 'contains':
-      return asText(current).toLocaleLowerCase('ar').includes(asText(filter.value).toLocaleLowerCase('ar'));
+      return asText(current)
+        .toLocaleLowerCase('ar')
+        .includes(asText(filter.value).toLocaleLowerCase('ar'));
     case 'startsWith':
-      return asText(current).toLocaleLowerCase('ar').startsWith(asText(filter.value).toLocaleLowerCase('ar'));
+      return asText(current)
+        .toLocaleLowerCase('ar')
+        .startsWith(asText(filter.value).toLocaleLowerCase('ar'));
     default:
       return false;
   }
 }
 
-export function matchesFilters(row: EngineRow, filters: readonly QueryFilter[]): boolean {
+export function matchesFilters(
+  row: EngineRow,
+  filters: readonly QueryFilter[],
+): boolean {
   return filters.every((filter) => matchesFilter(row, filter));
 }
 
@@ -172,8 +235,12 @@ export function compareRows(
     if (comparison !== 0) return comparison * factor;
   }
   // Stable, deterministic tie-breaker so pagination does not reshuffle rows.
-  const leftKey = asText(left.id ?? left.party_id ?? left.code ?? left.version ?? '');
-  const rightKey = asText(right.id ?? right.party_id ?? right.code ?? right.version ?? '');
+  const leftKey = asText(
+    left.id ?? left.party_id ?? left.code ?? left.version ?? '',
+  );
+  const rightKey = asText(
+    right.id ?? right.party_id ?? right.code ?? right.version ?? '',
+  );
   return leftKey === rightKey ? 0 : leftKey < rightKey ? -1 : 1;
 }
 
@@ -183,7 +250,8 @@ export function applyQuery(
   query: NormalizedQuery,
 ): QueryPage {
   const matched = rows.filter((row) => matchesFilters(row, query.filters));
-  if (query.orderBy.length > 0) matched.sort((a, b) => compareRows(a, b, query.orderBy));
+  if (query.orderBy.length > 0)
+    matched.sort((a, b) => compareRows(a, b, query.orderBy));
   return {
     rows: matched.slice(query.offset, query.offset + query.limit),
     total: matched.length,
@@ -201,7 +269,10 @@ export function indexRangeFilter(
     const first = index.columns[0];
     if (!first) continue;
     const filter = filters.find(
-      (candidate) => candidate.column === first && candidate.op === 'eq' && candidate.value !== null,
+      (candidate) =>
+        candidate.column === first &&
+        candidate.op === 'eq' &&
+        candidate.value !== null,
     );
     const value = filter?.value;
     if (typeof value === 'string' || typeof value === 'number') {
@@ -218,8 +289,51 @@ export function orderIndex(
 ): { indexName: string; column: string } | null {
   const first = orderBy[0];
   if (!first) return null;
-  const column = table.columns.find((candidate) => candidate.name === first.column);
+  const column = table.columns.find(
+    (candidate) => candidate.name === first.column,
+  );
   if (!column || column.notNull === false) return null;
-  const index = table.indexes.find((candidate) => candidate.columns[0] === first.column);
+  const index = table.indexes.find(
+    (candidate) => candidate.columns[0] === first.column,
+  );
   return index ? { indexName: index.name, column: first.column } : null;
+}
+
+/** Internal streaming reads have no displayed total; public query() always counts exactly. */
+export interface ScanOptions {
+  readonly filters?: readonly QueryFilter[];
+  readonly pageSize?: number;
+}
+export async function* scanKeyset(
+  table: PortableTable,
+  options: ScanOptions,
+  read: (query: NormalizedQuery) => Promise<EngineRow[]>,
+): AsyncGenerator<EngineRow[]> {
+  const pageSize = Math.max(
+    1,
+    Math.min(500, Math.trunc(options.pageSize ?? 500)),
+  );
+  const key = table.primaryKey.length === 1 ? table.primaryKey[0]! : null;
+  let after: QueryScalar | undefined,
+    offset = 0;
+  for (;;) {
+    const filters = [
+      ...(options.filters ?? []),
+      ...(key && after !== undefined
+        ? [{ column: key, op: 'gt' as const, value: after }]
+        : []),
+    ];
+    const rows = await read(
+      normalizeQuery(table, {
+        filters,
+        limit: pageSize,
+        offset: key ? 0 : offset,
+      }),
+    );
+    if (!rows.length) return;
+    yield rows;
+    if (rows.length < pageSize) return;
+    if (key) after = rows.at(-1)![key] as QueryScalar;
+    else offset += rows.length;
+  }
 }
