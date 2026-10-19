@@ -12,17 +12,42 @@
  * rules with DDL/triggers/FTS5; IndexedDB enforces them in this layer because it
  * has neither SQL nor triggers.
  */
-import { PORTABLE_SCHEMA } from '../schema/v1/portable-schema.ts';
+import { foreignReferenceChecker } from './maintenance.ts';
+import { PORTABLE_SCHEMA } from '../schema/current.ts';
+import { PORTABLE_SCHEMA as V1_SCHEMA } from '../schema/v1/portable-schema.ts';
+import { CASE_MIGRATION_METADATA } from '../schema/v2/migration-metadata.ts';
+import { upgradeBackupTables } from '../cases/backup-upgrade.ts';
+import { assertCaseIntegrity, caseGraphErrors } from '../cases/integrity.ts';
+import {
+  affectedCaseRecords,
+  buildCaseProjection,
+} from '../cases/search-projection.ts';
 import { PORTABLE_SEED } from '../schema/v1/portable-seed.ts';
-import { getSyncEntity, syncEntityByTable, tryGetSyncEntity, type SyncEntityDefinition } from '../sync/entity-registry.ts';
+import {
+  getSyncEntity,
+  syncEntityByTable,
+  tryGetSyncEntity,
+  type SyncEntityDefinition,
+} from '../sync/current-registry.ts';
 import { normalizeArabic } from '../util/arabic.ts';
 import { SystemClock, type Clock } from '../util/clock.ts';
 import { toCanonicalTimestamp } from '../util/dates.ts';
 import { newId } from '../util/uuid.ts';
 import { stableStringify } from '../util/stable.ts';
-import { AppError, ConflictError, NotFoundError, ValidationError } from '../errors.ts';
+import {
+  AppError,
+  ConflictError,
+  NotFoundError,
+  ValidationError,
+} from '../errors.ts';
 import type { PortableIndex, PortableTable } from '../schema/portable-types.ts';
-import { applyQuery, type QueryOptions, type QueryPage } from './query.ts';
+import {
+  applyQuery,
+  normalizeQuery,
+  type ScanOptions,
+  type QueryOptions,
+  type QueryPage,
+} from './query.ts';
 
 const SCHEMA = PORTABLE_SCHEMA;
 import { compileCheck, type CompiledCheck, type Row } from './expression.ts';
@@ -57,6 +82,11 @@ export interface PortableOptions {
   readonly deviceLabel?: string;
   readonly timezone?: string;
   readonly schema?: typeof PORTABLE_SCHEMA;
+  readonly onIndexProgress?: (progress: {
+    entity: string;
+    processed: number;
+    total: number;
+  }) => void;
 }
 
 export interface SearchHit {
@@ -119,6 +149,15 @@ export class PortableLawOffice {
   deviceCode = '';
   private device: EngineRow = {};
   private activeTx: PortableTransaction | null = null;
+  private readonly pendingSearch = new Map<
+    string,
+    { type: string; id: string }
+  >();
+  private readonly pendingMutations: Array<{
+    table: string;
+    row: EngineRow;
+    previous?: EngineRow;
+  }> = [];
 
   /**
    * Reads join the active transaction when one exists. This matters on
@@ -133,7 +172,7 @@ export class PortableLawOffice {
   private constructor(options: PortableOptions) {
     this.store = options.store;
     this.clock = options.clock ?? new SystemClock();
-    this.appVersion = options.appVersion ?? '0.1.0';
+    this.appVersion = options.appVersion ?? '0.3.0';
     for (const table of this.schema.tables) {
       this.tables.set(table.name, table);
       this.indexes.set(
@@ -145,7 +184,8 @@ export class PortableLawOffice {
         table.checks.map((check) => compileCheck(check.expression)),
       );
       for (const index of table.indexes) {
-        if (index.where) this.partialChecks.set(index.name, compileCheck(index.where));
+        if (index.where)
+          this.partialChecks.set(index.name, compileCheck(index.where));
       }
     }
     this.pendingOptions = options;
@@ -173,7 +213,11 @@ export class PortableLawOffice {
         const deviceId = await tx.get('app_meta', 'local.device_id');
         if (typeof deviceId?.value === 'string' && deviceId.value.length > 0) {
           const device = await tx.get('local_device', deviceId.value);
-          if (!device) throw new AppError('INVALID_STATE', 'local.device_id points at a missing device');
+          if (!device)
+            throw new AppError(
+              'INVALID_STATE',
+              'local.device_id points at a missing device',
+            );
           this.device = device;
           this.deviceId = String(device.id);
           this.deviceCode = String(device.short_code);
@@ -184,11 +228,33 @@ export class PortableLawOffice {
       },
     );
     await this.store.transaction(['app_meta'], async (tx) => {
-      await tx.put('app_meta', toAppMeta('app.version', this.appVersion, this.now()));
-      await tx.put('app_meta', toAppMeta('engine', this.store.engine, this.now()));
-      await tx.put('app_meta', toAppMeta('db.engine', this.store.engine, this.now()));
-      await tx.put('app_meta', toAppMeta('last_opened_at', this.now(), this.now()));
+      await tx.put(
+        'app_meta',
+        toAppMeta('app.version', this.appVersion, this.now()),
+      );
+      await tx.put(
+        'app_meta',
+        toAppMeta('engine', this.store.engine, this.now()),
+      );
+      await tx.put(
+        'app_meta',
+        toAppMeta('db.engine', this.store.engine, this.now()),
+      );
+      await tx.put(
+        'app_meta',
+        toAppMeta('last_opened_at', this.now(), this.now()),
+      );
     });
+    if (
+      (await this.store.get('app_meta', 'search.rebuild_pending'))?.value ===
+      '1'
+    )
+      await this.rebuildSearch();
+    else if (
+      this.schema.schemaVersion >= 2 &&
+      (await this.store.get('app_meta', 'cases.index_version'))?.value !== '2'
+    )
+      await this.rebuildCaseIndex();
   }
 
   private async registerDevice(
@@ -200,7 +266,9 @@ export class PortableLawOffice {
     let shortCode = compact.slice(0, 6);
     for (const length of [6, 8, 10, 12]) {
       const candidate = compact.slice(0, length);
-      const existing = await tx.getByColumns('local_device', { short_code: candidate });
+      const existing = await tx.getByColumns('local_device', {
+        short_code: candidate,
+      });
       if (existing.length === 0) {
         shortCode = candidate;
         break;
@@ -210,7 +278,9 @@ export class PortableLawOffice {
     const device: EngineRow = {
       id,
       label: options.deviceLabel?.trim() || 'جهاز محلي',
-      platform: options.platform ?? (this.store.engine === 'indexeddb' ? 'web' : 'unknown'),
+      platform:
+        options.platform ??
+        (this.store.engine === 'indexeddb' ? 'web' : 'unknown'),
       short_code: shortCode,
       app_version: this.appVersion,
       timezone: options.timezone ?? 'Africa/Cairo',
@@ -229,7 +299,12 @@ export class PortableLawOffice {
     await tx.put('app_meta', toAppMeta('local.device_id', id, now));
     await tx.put('app_meta', toAppMeta('local.device_created_at', now, now));
     await this.audit(tx, 'setup', 'device', id, 'registered local device');
-    await this.enqueue(tx, 'device', id, 'insert', device, ['id', 'label', 'platform', 'short_code']);
+    await this.enqueue(tx, 'device', id, 'insert', device, [
+      'id',
+      'label',
+      'platform',
+      'short_code',
+    ]);
     this.deviceId = id;
     this.deviceCode = shortCode;
     return device;
@@ -250,16 +325,26 @@ export class PortableLawOffice {
    * transaction over all stores because IndexedDB fixes its scope at creation;
    * the working set is small and correctness is preferred over micro-tuning.
    */
-  async transaction<T>(fn: (tx: PortableTransaction) => Promise<T>, tables?: readonly string[]): Promise<T> {
+  async transaction<T>(
+    fn: (tx: PortableTransaction) => Promise<T>,
+    tables?: readonly string[],
+  ): Promise<T> {
     if (this.activeTx) return fn(this.activeTx);
-    return this.store.transaction(tables ?? this.schema.tables.map((table) => table.name), async (tx) => {
-      this.activeTx = tx;
-      try {
-        return await fn(tx);
-      } finally {
-        this.activeTx = null;
-      }
-    });
+    return this.store.transaction(
+      tables ?? this.schema.tables.map((table) => table.name),
+      async (tx) => {
+        this.activeTx = tx;
+        try {
+          const result = await fn(tx);
+          await this.flushSearch(tx);
+          return result;
+        } finally {
+          this.pendingSearch.clear();
+          this.pendingMutations.length = 0;
+          this.activeTx = null;
+        }
+      },
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -269,27 +354,51 @@ export class PortableLawOffice {
   table(entityCode: string): PortableTable {
     const definition = getSyncEntity(entityCode);
     const table = this.tables.get(definition.table);
-    if (!table) throw new AppError('VALIDATION_FAILED', `unknown table ${definition.table}`);
+    if (!table)
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown table ${definition.table}`,
+      );
     return table;
   }
 
-  private tableFor(entityCode: string): { definition: SyncEntityDefinition; table: PortableTable } {
+  private tableFor(entityCode: string): {
+    definition: SyncEntityDefinition;
+    table: PortableTable;
+  } {
     const definition = getSyncEntity(entityCode);
     const table = this.tables.get(definition.table);
-    if (!table) throw new AppError('VALIDATION_FAILED', `unknown table ${definition.table}`);
+    if (!table)
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown table ${definition.table}`,
+      );
     return { definition, table };
   }
 
-  async get(entityCode: string, id: string, options: { includeDeleted?: boolean } = {}): Promise<EngineRow | undefined> {
+  async get(
+    entityCode: string,
+    id: string,
+    options: { includeDeleted?: boolean } = {},
+  ): Promise<EngineRow | undefined> {
     const { definition } = this.tableFor(entityCode);
     const key = definition.primaryKeyColumn === 'id' ? id : id;
     const row = await this.conn.get(definition.table, key);
     if (!row) return undefined;
-    if (!options.includeDeleted && row.deleted_at !== null && row.deleted_at !== undefined) return undefined;
+    if (
+      !options.includeDeleted &&
+      row.deleted_at !== null &&
+      row.deleted_at !== undefined
+    )
+      return undefined;
     return row;
   }
 
-  async require(entityCode: string, id: string, options: { includeDeleted?: boolean } = {}): Promise<EngineRow> {
+  async require(
+    entityCode: string,
+    id: string,
+    options: { includeDeleted?: boolean } = {},
+  ): Promise<EngineRow> {
     const row = await this.get(entityCode, id, options);
     if (!row) throw new NotFoundError(entityCode, id);
     return row;
@@ -308,11 +417,15 @@ export class PortableLawOffice {
     const { definition } = this.tableFor(entityCode);
     let rows = await this.conn.getAll(definition.table);
     if (!options.includeDeleted) {
-      rows = rows.filter((row) => row.deleted_at === null || row.deleted_at === undefined);
+      rows = rows.filter(
+        (row) => row.deleted_at === null || row.deleted_at === undefined,
+      );
     }
     if (options.where) {
       const entries = Object.entries(options.where);
-      rows = rows.filter((row) => entries.every(([column, value]) => (row[column] ?? null) === value));
+      rows = rows.filter((row) =>
+        entries.every(([column, value]) => (row[column] ?? null) === value),
+      );
     }
     if (options.orderBy) {
       const { column, direction = 'asc' } = options.orderBy;
@@ -330,14 +443,16 @@ export class PortableLawOffice {
     return rows.slice(offset, offset + limit);
   }
 
-  async count(entityCode: string, where?: Readonly<Record<string, string | number | null>>): Promise<number> {
-    const { definition } = this.tableFor(entityCode);
-    const all = await this.conn.getAll(definition.table);
-    return all.filter(
-      (row) =>
-        (row.deleted_at === null || row.deleted_at === undefined) &&
-        (!where || Object.entries(where).every(([column, value]) => (row[column] ?? null) === value)),
-    ).length;
+  async count(
+    entityCode: string,
+    where?: Readonly<Record<string, string | number | null>>,
+  ): Promise<number> {
+    const filters = Object.entries(where ?? {}).map(([column, value]) => ({
+      column,
+      op: value === null ? ('isNull' as const) : ('eq' as const),
+      ...(value !== null ? { value } : {}),
+    }));
+    return (await this.query(entityCode, { filters, limit: 0 })).total;
   }
 
   /**
@@ -351,7 +466,10 @@ export class PortableLawOffice {
   ): Promise<QueryPage> {
     const { definition, table } = this.tableFor(entityCode);
     const filters = [...(options.filters ?? [])];
-    if (!options.includeDeleted && table.columns.some((column) => column.name === 'deleted_at')) {
+    if (
+      !options.includeDeleted &&
+      table.columns.some((column) => column.name === 'deleted_at')
+    ) {
       filters.push({ column: 'deleted_at', op: 'isNull' });
     }
     const queryOptions: QueryOptions = {
@@ -361,23 +479,76 @@ export class PortableLawOffice {
       limit: options.limit ?? 50,
     };
     if (this.activeTx) {
-      return applyQuery(
-        await this.activeTx.getAll(definition.table),
-        {
-          filters: queryOptions.filters ?? [],
-          orderBy: queryOptions.orderBy ?? [],
-          offset: queryOptions.offset ?? 0,
-          limit: queryOptions.limit ?? 50,
-        },
+      const eq = Object.fromEntries(
+        filters
+          .filter(
+            (f) =>
+              f.op === 'eq' &&
+              (typeof f.value === 'string' || typeof f.value === 'number'),
+          )
+          .map((f) => [f.column, f.value as string | number]),
       );
+      const driver =
+        filters.find((f) => f.op === 'in') ??
+        filters.find((f) => f.op === 'eq' && f.value !== null);
+      const candidates = driver
+        ? (
+            await Promise.all(
+              [
+                ...new Set(
+                  Array.isArray(driver.value) ? driver.value : [driver.value],
+                ),
+              ].map((v) =>
+                this.activeTx!.getByColumns(
+                  definition.table,
+                  { ...eq, [driver.column]: v as string | number },
+                  { activeOnly: !options.includeDeleted },
+                ),
+              ),
+            )
+          ).flat()
+        : await this.activeTx.getAll(definition.table);
+      return applyQuery(candidates, normalizeQuery(table, queryOptions));
     }
+
     return this.store.query(definition.table, queryOptions);
+  }
+
+  async *iterate(
+    entityCode: string,
+    options: ScanOptions = {},
+  ): AsyncGenerator<EngineRow[]> {
+    if (this.activeTx) {
+      let offset = 0;
+      for (;;) {
+        const page = await this.query(entityCode, {
+          filters: options.filters ?? [],
+          limit: options.pageSize ?? 500,
+          offset,
+        });
+        if (!page.rows.length) return;
+        yield page.rows;
+        offset += page.rows.length;
+        if (offset >= page.total) return;
+      }
+    } else {
+      const { definition, table } = this.tableFor(entityCode);
+      const filters = [
+        ...(options.filters ?? []),
+        ...(table.columns.some((c) => c.name === 'deleted_at')
+          ? [{ column: 'deleted_at', op: 'isNull' as const }]
+          : []),
+      ];
+      yield* this.store.scan(definition.table, { ...options, filters });
+    }
   }
 
   /** Soft-deleted rows, newest first; used by the archive/restore screen. */
   async listDeleted(
     entityCode: string,
-    options: Omit<QueryOptions, 'filters'> & { filters?: QueryOptions['filters'] } = {},
+    options: Omit<QueryOptions, 'filters'> & {
+      filters?: QueryOptions['filters'];
+    } = {},
   ): Promise<QueryPage> {
     return this.query(entityCode, {
       ...options,
@@ -403,20 +574,53 @@ export class PortableLawOffice {
     if (this.activeTx) {
       const rows = await this.activeTx.getAll('audit_log');
       return rows
-        .sort((left, right) => String(right.occurred_at).localeCompare(String(left.occurred_at)))
+        .sort((left, right) =>
+          String(right.occurred_at).localeCompare(String(left.occurred_at)),
+        )
         .slice(0, pageSize);
     }
     return (await this.store.query('audit_log', options)).rows;
   }
 
-  async auditTrail(entityType: string, entityId: string, limit = 50): Promise<EngineRow[]> {
-    const pageSize = Math.max(1, Math.min(200, Math.trunc(limit)));
-    const rows = this.activeTx
-      ? (await this.activeTx.getByColumns('audit_log', { entity_type: entityType, entity_id: entityId }))
-      : await this.store.getByColumns('audit_log', { entity_type: entityType, entity_id: entityId });
-    return rows
-      .sort((left, right) => String(right.occurred_at).localeCompare(String(left.occurred_at)))
-      .slice(0, pageSize);
+  async auditTrailPage(
+    entityType: string,
+    entityId: string,
+    options: QueryOptions = {},
+  ): Promise<QueryPage> {
+    const queryOptions = {
+      ...options,
+      filters: [
+        ...(options.filters ?? []),
+        { column: 'entity_type', op: 'eq' as const, value: entityType },
+        { column: 'entity_id', op: 'eq' as const, value: entityId },
+      ],
+      orderBy: [{ column: 'occurred_at', direction: 'desc' as const }],
+    };
+    if (this.activeTx) {
+      const rows = await this.activeTx.getByColumns('audit_log', {
+        entity_type: entityType,
+        entity_id: entityId,
+      });
+      return applyQuery(
+        rows,
+        normalizeQuery(
+          this.schema.tables.find((t) => t.name === 'audit_log')!,
+          queryOptions,
+        ),
+      );
+    }
+    return this.store.query('audit_log', queryOptions);
+  }
+  async auditTrail(
+    entityType: string,
+    entityId: string,
+    limit = 50,
+  ): Promise<EngineRow[]> {
+    return (
+      await this.auditTrailPage(entityType, entityId, {
+        limit: Math.min(200, Math.max(1, Math.trunc(limit))),
+      })
+    ).rows;
   }
 
   async getDeviceSetting(key: string): Promise<string | null> {
@@ -429,37 +633,74 @@ export class PortableLawOffice {
     key: string,
     value: string | number | boolean,
     valueType: 'string' | 'number' | 'boolean' | 'json' = 'string',
+    options: { independent?: boolean } = {},
   ): Promise<void> {
     assertSettingKey(key);
     const normalized = normalizeSettingValue(value, valueType);
-    await this.transaction(async (tx) => {
+    const write = async (tx: PortableTransaction) => {
+      const deviceId = options.independent
+        ? String(
+            (await tx.get('app_meta', 'local.device_id'))?.value ??
+              this.deviceId,
+          )
+        : this.deviceId;
       await tx.put('device_setting', {
-        device_id: this.deviceId,
+        device_id: deviceId,
         key,
         value: normalized,
         value_type: valueType,
         updated_at: this.now(),
       });
-    }, ['device_setting']);
+    };
+    // UI event tasks cannot join an unrelated IndexedDB transaction: it is
+    // active only in its own request tasks. Independent UI writes are queued
+    // by the engine and never replace the business transaction's activeTx.
+    // Do not await an independent UI write from inside a business callback.
+    if (options.independent)
+      await this.store.transaction(['device_setting', 'app_meta'], write);
+    else await this.transaction(write, ['device_setting']);
   }
 
   async listDeviceSettings(): Promise<EngineRow[]> {
-    const rows = await this.conn.getByColumns('device_setting', { device_id: this.deviceId });
-    return rows.sort((left, right) => String(left.key).localeCompare(String(right.key)));
+    const rows = await this.conn.getByColumns('device_setting', {
+      device_id: this.deviceId,
+    });
+    return rows.sort((left, right) =>
+      String(left.key).localeCompare(String(right.key)),
+    );
   }
 
-  async removeDeviceSetting(key: string): Promise<void> {
+  async removeDeviceSetting(
+    key: string,
+    options: { independent?: boolean } = {},
+  ): Promise<void> {
     assertSettingKey(key);
-    await this.transaction(async (tx) => {
-      await tx.delete('device_setting', [this.deviceId, key]);
-    }, ['device_setting']);
+    const write = async (tx: PortableTransaction) => {
+      const deviceId = options.independent
+        ? String(
+            (await tx.get('app_meta', 'local.device_id'))?.value ??
+              this.deviceId,
+          )
+        : this.deviceId;
+      await tx.delete('device_setting', [deviceId, key]);
+    };
+    if (options.independent)
+      await this.store.transaction(['device_setting', 'app_meta'], write);
+    else await this.transaction(write, ['device_setting']);
   }
 
-  async insert(entityCode: string, values: Record<string, unknown>, options: { id?: string } = {}): Promise<EngineRow> {
+  async insert(
+    entityCode: string,
+    values: Record<string, unknown>,
+    options: { id?: string } = {},
+  ): Promise<EngineRow> {
     const { definition, table } = this.tableFor(entityCode);
     for (const header of HEADER_COLUMNS) {
       if (header in values) {
-        throw new ValidationError(`field ${header} is managed by the data layer`, { field: header });
+        throw new ValidationError(
+          `field ${header} is managed by the data layer`,
+          { field: header },
+        );
       }
     }
     const providedPk = values[definition.primaryKeyColumn];
@@ -481,29 +722,52 @@ export class PortableLawOffice {
       if (row[column.name] === undefined) {
         const injected = this.headerValue(column.name, 'insert', now);
         if (injected !== undefined) row[column.name] = injected;
-        else if (column.defaultValue !== undefined) row[column.name] = column.defaultValue;
+        else if (column.defaultValue !== undefined)
+          row[column.name] = column.defaultValue;
         else row[column.name] = null;
       }
     }
-    return this.writeEntity(definition, table, row, 'insert', Object.keys(values));
+    return this.writeEntity(
+      definition,
+      table,
+      row,
+      'insert',
+      Object.keys(values),
+    );
   }
 
-  async update(entityCode: string, id: string, patch: Record<string, unknown>): Promise<EngineRow> {
+  async update(
+    entityCode: string,
+    id: string,
+    patch: Record<string, unknown>,
+  ): Promise<EngineRow> {
     const { definition, table } = this.tableFor(entityCode);
-    if (definition.policy === 'append_only' || definition.policy === 'immutable') {
-      throw new AppError('IMMUTABLE_RECORD', `${entityCode} rows cannot be updated`);
+    if (
+      definition.policy === 'append_only' ||
+      definition.policy === 'immutable'
+    ) {
+      throw new AppError(
+        'IMMUTABLE_RECORD',
+        `${entityCode} rows cannot be updated`,
+      );
     }
     const allowed = new Set(definition.mutableColumns);
     for (const key of Object.keys(patch)) {
       if (key === 'id') throw new ValidationError('id cannot be changed');
-      if (!allowed.has(key)) throw new ValidationError(`field ${key} is not mutable on ${entityCode}`, { field: key });
+      if (!allowed.has(key))
+        throw new ValidationError(
+          `field ${key} is not mutable on ${entityCode}`,
+          { field: key },
+        );
     }
     return this.transaction(async (tx) => {
       const current = await tx.get(definition.table, id);
-      if (!current || current.deleted_at !== null) throw new NotFoundError(entityCode, id);
+      if (!current || current.deleted_at !== null)
+        throw new NotFoundError(entityCode, id);
       const changes: EngineRow = {};
       for (const [key, raw] of Object.entries(patch)) {
-        const value = raw === undefined ? null : (raw as string | number | null);
+        const value =
+          raw === undefined ? null : (raw as string | number | null);
         if ((current[key] ?? null) !== value) changes[key] = value;
       }
       if (Object.keys(changes).length === 0) return current;
@@ -514,11 +778,22 @@ export class PortableLawOffice {
         revision: Number(current.revision) + 1,
         sync_status: 'pending',
       };
-      return this.writeEntity(definition, table, row, 'update', Object.keys(changes), tx);
+      return this.writeEntity(
+        definition,
+        table,
+        row,
+        'update',
+        Object.keys(changes),
+        tx,
+      );
     });
   }
 
-  async archive(entityCode: string, id: string, archived: boolean): Promise<EngineRow> {
+  async archive(
+    entityCode: string,
+    id: string,
+    archived: boolean,
+  ): Promise<EngineRow> {
     const { definition, table } = this.tableFor(entityCode);
     if (!table.columns.some((column) => column.name === 'archived_at')) {
       throw new ValidationError(`${entityCode} does not support archive`);
@@ -526,7 +801,8 @@ export class PortableLawOffice {
     const now = this.now();
     return this.transaction(async (tx) => {
       const current = await tx.get(definition.table, id);
-      if (!current || current.deleted_at !== null) throw new NotFoundError(entityCode, id);
+      if (!current || current.deleted_at !== null)
+        throw new NotFoundError(entityCode, id);
       const row: EngineRow = {
         ...current,
         archived_at: archived ? now : null,
@@ -534,92 +810,140 @@ export class PortableLawOffice {
         revision: Number(current.revision) + 1,
         sync_status: 'pending',
       };
-      return this.writeEntity(definition, table, row, archived ? 'archive' : 'unarchive', ['archived_at'], tx);
+      return this.writeEntity(
+        definition,
+        table,
+        row,
+        archived ? 'archive' : 'unarchive',
+        ['archived_at'],
+        tx,
+      );
     });
   }
 
-  async softDelete(entityCode: string, id: string, reason?: string): Promise<{ batchId: string; affectedCount: number }> {
+  async softDelete(
+    entityCode: string,
+    id: string,
+    reason?: string,
+  ): Promise<{ batchId: string; affectedCount: number }> {
     const { definition } = this.tableFor(entityCode);
-    if (!definition.softDelete) throw new AppError('IMMUTABLE_RECORD', `${entityCode} cannot be soft-deleted`);
-    return this.transaction(
-      async (tx) => {
-        const now = this.now();
-        const batchId = newId();
-        await tx.put('deletion_batch', {
-          id: batchId,
-          created_at: now,
-          origin_device_id: this.deviceId,
-          root_entity_type: entityCode,
-          root_entity_id: id,
-          policy: 'cascade_owned',
-          affected_count: 0,
-          restored_at: null,
-        });
-        const entries: Array<{ entityCode: string; id: string }> = [];
-        await this.assertNoBlockingDependents(tx, definition, id);
-        await this.cascadeDelete(tx, definition.code, id, batchId, entries, new Set());
-        if (entries.length === 0) throw new NotFoundError(entityCode, id);
-        await tx.put('deletion_batch', {
-          id: batchId,
-          created_at: now,
-          origin_device_id: this.deviceId,
-          root_entity_type: entityCode,
-          root_entity_id: id,
-          policy: 'cascade_owned',
-          affected_count: entries.length,
-          restored_at: null,
-        });
-        await this.audit(tx, 'delete', entityCode, id, reason ?? 'soft delete', {
-          batchId,
-          affectedCount: entries.length,
-        });
-        return { batchId, affectedCount: entries.length };
-      },
-    );
+    if (!definition.softDelete)
+      throw new AppError(
+        'IMMUTABLE_RECORD',
+        `${entityCode} cannot be soft-deleted`,
+      );
+    return this.transaction(async (tx) => {
+      const now = this.now();
+      const batchId = newId();
+      await tx.put('deletion_batch', {
+        id: batchId,
+        created_at: now,
+        origin_device_id: this.deviceId,
+        root_entity_type: entityCode,
+        root_entity_id: id,
+        policy: 'cascade_owned',
+        affected_count: 0,
+        restored_at: null,
+      });
+      const entries: Array<{ entityCode: string; id: string }> = [];
+      await this.assertNoBlockingDependents(tx, definition, id);
+      await this.cascadeDelete(
+        tx,
+        definition.code,
+        id,
+        batchId,
+        entries,
+        new Set(),
+      );
+      if (entries.length === 0) throw new NotFoundError(entityCode, id);
+      await tx.put('deletion_batch', {
+        id: batchId,
+        created_at: now,
+        origin_device_id: this.deviceId,
+        root_entity_type: entityCode,
+        root_entity_id: id,
+        policy: 'cascade_owned',
+        affected_count: entries.length,
+        restored_at: null,
+      });
+      await this.audit(tx, 'delete', entityCode, id, reason ?? 'soft delete', {
+        batchId,
+        affectedCount: entries.length,
+      });
+      return { batchId, affectedCount: entries.length };
+    });
   }
 
-  async restore(entityCode: string, id: string): Promise<{ batchId: string | null; restoredCount: number }> {
-    return this.transaction(
-      async (tx) => {
-        const entries = await tx.getAll('deletion_entry');
-        const forEntity = entries
-          .filter((entry) => entry.entity_type === entityCode && entry.entity_id === id)
-          .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
-        // Find the latest batch containing this entity and still not restored.
-        let batchId: string | null = null;
-        for (const entry of forEntity) {
-          const batch = await tx.get('deletion_batch', String(entry.batch_id));
-          if (batch && batch.restored_at === null) {
-            batchId = String(batch.id);
-            break;
-          }
+  async restore(
+    entityCode: string,
+    id: string,
+  ): Promise<{ batchId: string | null; restoredCount: number }> {
+    return this.transaction(async (tx) => {
+      const entries = await tx.getAll('deletion_entry');
+      const forEntity = entries
+        .filter(
+          (entry) => entry.entity_type === entityCode && entry.entity_id === id,
+        )
+        .sort((left, right) =>
+          String(right.created_at).localeCompare(String(left.created_at)),
+        );
+      // Find the latest batch containing this entity and still not restored.
+      let batchId: string | null = null;
+      for (const entry of forEntity) {
+        const batch = await tx.get('deletion_batch', String(entry.batch_id));
+        if (batch && batch.restored_at === null) {
+          batchId = String(batch.id);
+          break;
         }
-        if (!batchId) throw new ConflictError('nothing to restore', 'NOT_DELETED', { entity: entityCode, id });
-        const batchEntries = entries.filter((entry) => entry.batch_id === batchId);
-        let restored = 0;
-        for (const entry of batchEntries) {
-          const childDefinition = tryGetSyncEntity(String(entry.entity_type));
-          if (!childDefinition) continue;
-          const row = await tx.get(childDefinition.table, String(entry.entity_id));
-          if (!row || row.deleted_at === null) continue;
-          const next: EngineRow = {
-            ...row,
-            deleted_at: null,
-            updated_at: this.now(),
-            revision: Number(row.revision) + 1,
-            sync_status: 'pending',
-          };
-          await this.writeEntity(childDefinition, this.tables.get(childDefinition.table)!, next, 'restore', ['deleted_at'], tx);
-          restored += 1;
-        }
-        await tx.put('deletion_batch', {
-          ...(await tx.get('deletion_batch', batchId))!,
-          restored_at: this.now(),
+      }
+      if (!batchId)
+        throw new ConflictError('nothing to restore', 'NOT_DELETED', {
+          entity: entityCode,
+          id,
         });
-        await this.audit(tx, 'restore', entityCode, id, 'restored deletion batch', { batchId, restored });
-        return { batchId, restoredCount: restored };
-      },
-    );
+      const batchEntries = entries.filter(
+        (entry) => entry.batch_id === batchId,
+      );
+      let restored = 0;
+      for (const entry of batchEntries) {
+        const childDefinition = tryGetSyncEntity(String(entry.entity_type));
+        if (!childDefinition) continue;
+        const row = await tx.get(
+          childDefinition.table,
+          String(entry.entity_id),
+        );
+        if (!row || row.deleted_at === null) continue;
+        const next: EngineRow = {
+          ...row,
+          deleted_at: null,
+          updated_at: this.now(),
+          revision: Number(row.revision) + 1,
+          sync_status: 'pending',
+        };
+        await this.writeEntity(
+          childDefinition,
+          this.tables.get(childDefinition.table)!,
+          next,
+          'restore',
+          ['deleted_at'],
+          tx,
+        );
+        restored += 1;
+      }
+      await tx.put('deletion_batch', {
+        ...(await tx.get('deletion_batch', batchId))!,
+        restored_at: this.now(),
+      });
+      await this.audit(
+        tx,
+        'restore',
+        entityCode,
+        id,
+        'restored deletion batch',
+        { batchId, restored },
+      );
+      return { batchId, restoredCount: restored };
+    });
   }
 
   // ---------------------------------------------------------------------
@@ -635,11 +959,26 @@ export class PortableLawOffice {
     existingTx?: PortableTransaction,
   ): Promise<EngineRow> {
     const run = async (tx: PortableTransaction): Promise<EngineRow> => {
+      const previous =
+        action === 'insert'
+          ? undefined
+          : await tx.get(table.name, String(row[definition.primaryKeyColumn]));
       await this.writeRow(tx, table.name, row, action);
       const operation =
-        action === 'insert' ? 'insert' : action === 'restore' ? 'restore' : 'update';
+        action === 'insert'
+          ? 'insert'
+          : action === 'restore'
+            ? 'restore'
+            : 'update';
       if (definition.softDelete || action === 'insert') {
-        await this.enqueue(tx, definition.code, String(row[definition.primaryKeyColumn]), operation, row, changedFields);
+        await this.enqueue(
+          tx,
+          definition.code,
+          String(row[definition.primaryKeyColumn]),
+          operation,
+          row,
+          changedFields,
+        );
       }
       await this.audit(
         tx,
@@ -647,10 +986,12 @@ export class PortableLawOffice {
         definition.code,
         String(row[definition.primaryKeyColumn]),
         `${action} ${definition.code}`,
-        Object.fromEntries(changedFields.map((field) => [field, row[field] ?? null])),
+        Object.fromEntries(
+          changedFields.map((field) => [field, row[field] ?? null]),
+        ),
         definition.sensitiveColumns,
       );
-      await this.refreshSearch(tx, definition.code, String(row[definition.primaryKeyColumn]));
+      this.markSearch(definition.code, table.name, row, previous);
       return row;
     };
     if (existingTx) return run(existingTx);
@@ -664,15 +1005,20 @@ export class PortableLawOffice {
     action: string,
   ): Promise<void> {
     const tableDefinition = this.tables.get(tableName);
-    if (!tableDefinition) throw new AppError('VALIDATION_FAILED', `unknown table ${tableName}`);
+    if (!tableDefinition)
+      throw new AppError('VALIDATION_FAILED', `unknown table ${tableName}`);
     const known = new Set(tableDefinition.columns.map((column) => column.name));
     const unknown = Object.keys(row).filter((column) => !known.has(column));
     if (unknown.length > 0) {
-      throw new AppError('VALIDATION_FAILED', `unknown column(s) on ${tableName}: ${unknown.join(', ')}`);
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `unknown column(s) on ${tableName}: ${unknown.join(', ')}`,
+      );
     }
     this.assertLocalConstraints(tableName, row);
     await this.assertForeignKeys(tx, tableName, row);
     await this.assertUnique(tx, tableName, row);
+    await assertCaseIntegrity(tx, tableName, row);
     const appendOnly =
       tableName === 'audit_log' ||
       tableName === 'schema_migration' ||
@@ -687,7 +1033,8 @@ export class PortableLawOffice {
 
   assertLocalConstraints(tableName: string, row: EngineRow): void {
     const table = this.tables.get(tableName);
-    if (!table) throw new AppError('VALIDATION_FAILED', `unknown table ${tableName}`);
+    if (!table)
+      throw new AppError('VALIDATION_FAILED', `unknown table ${tableName}`);
     const errors: string[] = [];
     for (const column of table.columns) {
       const value = row[column.name] ?? null;
@@ -695,18 +1042,28 @@ export class PortableLawOffice {
         if (column.notNull) errors.push(`${column.name} is required`);
         continue;
       }
-      if (column.type === 'TEXT' && typeof value !== 'string') errors.push(`${column.name} must be text`);
-      if (column.type === 'INTEGER' && (typeof value !== 'number' || !Number.isInteger(value))) {
+      if (column.type === 'TEXT' && typeof value !== 'string')
+        errors.push(`${column.name} must be text`);
+      if (
+        column.type === 'INTEGER' &&
+        (typeof value !== 'number' || !Number.isInteger(value))
+      ) {
         errors.push(`${column.name} must be an integer`);
       }
     }
     for (const check of this.checks.get(tableName) ?? []) {
       if (!check.test(row as Row)) {
-        errors.push(`CHECK failed: ${check.source.replace(/\s+/g, ' ').slice(0, 160)}`);
+        errors.push(
+          `CHECK failed: ${check.source.replace(/\s+/g, ' ').slice(0, 160)}`,
+        );
       }
     }
     if (errors.length > 0) {
-      throw new AppError('VALIDATION_FAILED', `constraint violation in ${tableName}`, { errors });
+      throw new AppError(
+        'VALIDATION_FAILED',
+        `constraint violation in ${tableName}`,
+        { errors },
+      );
     }
   }
 
@@ -726,7 +1083,9 @@ export class PortableLawOffice {
         const ownKey = table.primaryKey.map((column) => row[column] ?? null);
         if (
           foreignKey.referencedColumns.length === ownKey.length &&
-          foreignKey.referencedColumns.every((_, index) => ownKey[index] === values[index])
+          foreignKey.referencedColumns.every(
+            (_, index) => ownKey[index] === values[index],
+          )
         ) {
           continue;
         }
@@ -736,9 +1095,13 @@ export class PortableLawOffice {
         values.length === 1 ? (values[0] as string) : (values as string[]),
       );
       if (!parent) {
-        throw new AppError('FOREIGN_KEY_VIOLATION', `${tableName}.${foreignKey.columns.join(',')} has no parent`, {
-          referenced: foreignKey.referencedTable,
-        });
+        throw new AppError(
+          'FOREIGN_KEY_VIOLATION',
+          `${tableName}.${foreignKey.columns.join(',')} has no parent`,
+          {
+            referenced: foreignKey.referencedTable,
+          },
+        );
       }
     }
   }
@@ -757,30 +1120,52 @@ export class PortableLawOffice {
       }
       const values = index.columns.map((column) => row[column] ?? null);
       if (values.some((value) => value === null)) continue;
-      const candidates = await tx.getByColumns(tableName, { [index.columns[0]!]: values[0] as string });
+      const candidates = await tx.getByColumns(
+        tableName,
+        Object.fromEntries(
+          index.columns.map((c, i) => [c, values[i] as string | number]),
+        ),
+        {
+          activeOnly:
+            !!index.where && /\bdeleted_at\s+IS\s+NULL\b/i.test(index.where),
+        },
+      );
       const clash = candidates.find((candidate) => {
         if (candidate === row) return false;
         const sameKey =
           table.primaryKey.length === 1
             ? candidate[table.primaryKey[0]!] === row[table.primaryKey[0]!]
-            : table.primaryKey.every((column) => candidate[column] === row[column]);
+            : table.primaryKey.every(
+                (column) => candidate[column] === row[column],
+              );
         if (sameKey) return false;
         if (index.where) {
           const predicate = this.partialChecks.get(index.name);
           if (predicate && !predicate.test(candidate as Row)) return false;
         }
-        return index.columns.every((column, position) => (candidate[column] ?? null) === values[position]);
+        return index.columns.every(
+          (column, position) =>
+            (candidate[column] ?? null) === values[position],
+        );
       });
       if (clash) {
-        throw new AppError('UNIQUE_VIOLATION', `${tableName} violates unique index ${index.name}`, {
-          index: index.name,
-          columns: index.columns,
-        });
+        throw new AppError(
+          'UNIQUE_VIOLATION',
+          `${tableName} violates unique index ${index.name}`,
+          {
+            index: index.name,
+            columns: index.columns,
+          },
+        );
       }
     }
   }
 
-  private headerValue(column: string, mode: 'insert' | 'update', now: string): string | number | null | undefined {
+  private headerValue(
+    column: string,
+    mode: 'insert' | 'update',
+    now: string,
+  ): string | number | null | undefined {
     switch (column) {
       case 'created_at':
         return now;
@@ -839,8 +1224,7 @@ export class PortableLawOffice {
     row: EngineRow,
     changedFields: readonly string[],
   ): Promise<void> {
-    const outbox = await tx.getAll('sync_outbox');
-    const sequence = outbox.reduce((max, current) => Math.max(max, Number(current.sequence ?? 0)), 0) + 1;
+    const sequence = await this.nextSequence(tx, 'sync_outbox', 'sequence');
     await tx.put('sync_outbox', {
       id: newId(),
       sequence,
@@ -869,16 +1253,22 @@ export class PortableLawOffice {
       if (rule.policy !== 'block') continue;
       const rows = await tx.getAll(rule.table);
       const count = rows.filter(
-        (row) => row[rule.column] === id && (row.deleted_at === null || row.deleted_at === undefined),
+        (row) =>
+          row[rule.column] === id &&
+          (row.deleted_at === null || row.deleted_at === undefined),
       ).length;
       if (count > 0) blockers.push({ table: rule.table, count });
     }
     if (blockers.length > 0) {
-      throw new ConflictError(`cannot delete ${definition.code}: related records exist`, 'DEPENDENT_RECORDS_EXIST', {
-        entity: definition.code,
-        id,
-        blockers,
-      });
+      throw new ConflictError(
+        `cannot delete ${definition.code}: related records exist`,
+        'DEPENDENT_RECORDS_EXIST',
+        {
+          entity: definition.code,
+          id,
+          blockers,
+        },
+      );
     }
   }
 
@@ -895,7 +1285,10 @@ export class PortableLawOffice {
     visited.add(key);
     const definition = tryGetSyncEntity(entityCode);
     if (!definition || !definition.softDelete) {
-      throw new AppError('UNSUPPORTED_ENGINE', `cannot cascade-delete ${entityCode}`);
+      throw new AppError(
+        'UNSUPPORTED_ENGINE',
+        `cannot cascade-delete ${entityCode}`,
+      );
     }
     const row = await tx.get(definition.table, id);
     if (!row || row.deleted_at !== null) return;
@@ -919,7 +1312,7 @@ export class PortableLawOffice {
       created_at: now,
     });
     await this.enqueue(tx, entityCode, id, 'delete', next, ['deleted_at']);
-    await this.refreshSearch(tx, entityCode, id);
+    this.markSearch(entityCode, definition.table, next, row);
     for (const rule of definition.dependents) {
       if (rule.policy !== 'cascade') continue;
       const child = tryGetSyncEntityByTable(rule.table);
@@ -927,7 +1320,8 @@ export class PortableLawOffice {
       const children = await tx.getAll(rule.table);
       for (const childRow of children) {
         if (childRow[rule.column] !== id) continue;
-        if (childRow.deleted_at !== null && childRow.deleted_at !== undefined) continue;
+        if (childRow.deleted_at !== null && childRow.deleted_at !== undefined)
+          continue;
         await this.cascadeDelete(
           tx,
           child.code,
@@ -944,7 +1338,10 @@ export class PortableLawOffice {
   // Display numbers
   // ---------------------------------------------------------------------
 
-  async nextNumber(key: string, options: { scope?: string } = {}): Promise<{ value: number; formatted: string }> {
+  async nextNumber(
+    key: string,
+    options: { scope?: string } = {},
+  ): Promise<{ value: number; formatted: string }> {
     const scope = options.scope ?? '';
     return this.transaction(async (tx) => {
       const series = await tx.get('number_series', [key, scope]);
@@ -958,7 +1355,11 @@ export class PortableLawOffice {
         .replace(/\{value\}/g, String(value).padStart(padding, '0'))
         .replace(/\{year\}/g, String(now.getUTCFullYear()))
         .replace(/\{device\}/g, this.deviceCode);
-      await tx.put('number_series', { ...series, next_value: value + 1, updated_at: this.now() });
+      await tx.put('number_series', {
+        ...series,
+        next_value: value + 1,
+        updated_at: this.now(),
+      });
       return { value, formatted };
     });
   }
@@ -969,48 +1370,73 @@ export class PortableLawOffice {
 
   async lookup(listCode: string, itemCode: string): Promise<EngineRow> {
     const list = await this.requireList(listCode);
-    const items = await this.conn.getByColumns('lookup_item', { list_id: String(list.id) });
+    const items = await this.conn.getByColumns('lookup_item', {
+      list_id: String(list.id),
+    });
     const item = items.find(
       (candidate) =>
         candidate.code === itemCode &&
         candidate.is_active === 1 &&
         (candidate.deleted_at === null || candidate.deleted_at === undefined),
     );
-    if (!item) throw new ValidationError(`unknown code ${itemCode} in list ${listCode}`, { list: listCode, code: itemCode });
+    if (!item)
+      throw new ValidationError(
+        `unknown code ${itemCode} in list ${listCode}`,
+        { list: listCode, code: itemCode },
+      );
     return item;
   }
 
   private async requireList(listCode: string): Promise<EngineRow> {
-    const lists = await this.conn.getByColumns('lookup_list', { code: listCode });
-    const list = lists.find((candidate) => candidate.deleted_at === null || candidate.deleted_at === undefined);
+    const lists = await this.conn.getByColumns('lookup_list', {
+      code: listCode,
+    });
+    const list = lists.find(
+      (candidate) =>
+        candidate.deleted_at === null || candidate.deleted_at === undefined,
+    );
     if (!list) throw new NotFoundError('lookup_list', listCode);
     return list;
   }
 
-  async lookupOptional(listCode: string, itemCode: string | null | undefined): Promise<string | null> {
+  async lookupOptional(
+    listCode: string,
+    itemCode: string | null | undefined,
+  ): Promise<string | null> {
     if (!itemCode) return null;
     return String((await this.lookup(listCode, itemCode)).id);
   }
 
   async lookupItems(listCode: string): Promise<EngineRow[]> {
     const list = await this.requireList(listCode);
-    const items = await this.conn.getByColumns('lookup_item', { list_id: String(list.id) });
+    const items = await this.conn.getByColumns('lookup_item', {
+      list_id: String(list.id),
+    });
     return items
       .filter((item) => item.is_active === 1)
-      .sort((left, right) => Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0));
+      .sort(
+        (left, right) =>
+          Number(left.sort_order ?? 0) - Number(right.sort_order ?? 0),
+      );
   }
 
   // ---------------------------------------------------------------------
   // Search
   // ---------------------------------------------------------------------
 
-  private async refreshSearch(tx: PortableTransaction, entityType: string, entityId: string): Promise<void> {
+  private async refreshSearch(
+    tx: PortableTransaction,
+    entityType: string,
+    entityId: string,
+  ): Promise<void> {
     const table = tryGetSyncEntity(entityType)?.table;
     if (!table) return;
     const row = await tx.get(table, entityId);
     const existing = await this.findSearchDocument(tx, entityType, entityId);
     const deleted = !row || row.deleted_at !== null;
-    const parts = deleted ? null : await this.buildSearchText(tx, entityType, row);
+    const parts = deleted
+      ? null
+      : await this.buildSearchText(tx, entityType, row);
     if (!parts) {
       if (existing) await tx.delete('search_document', String(existing.id));
       return;
@@ -1023,8 +1449,29 @@ export class PortableLawOffice {
       title: parts.title,
       subtitle: parts.subtitle,
       body: parts.body,
-      normalized_text: normalizeArabic(`${parts.title} ${parts.subtitle ?? ''} ${parts.body}`),
+      normalized_text: normalizeArabic(
+        `${parts.title} ${parts.subtitle ?? ''} ${parts.body}`,
+      ),
       updated_at: this.now(),
+      ...Object.fromEntries(
+        this.schema.tables
+          .find((t) => t.name === 'search_document')!
+          .columns.filter(
+            (c) =>
+              ![
+                'id',
+                'entity_type',
+                'entity_id',
+                'title',
+                'subtitle',
+                'body',
+                'normalized_text',
+                'updated_at',
+              ].includes(c.name),
+          )
+          .map((c) => [c.name, c.defaultValue ?? null]),
+      ),
+      ...('facets' in parts ? (parts.facets as EngineRow) : {}),
     });
   }
 
@@ -1033,13 +1480,16 @@ export class PortableLawOffice {
     entityType: string,
     entityId: string,
   ): Promise<EngineRow | undefined> {
-    const docs = await tx.getByColumns('search_document', { entity_type: entityType });
-    return docs.find((doc) => doc.entity_id === entityId);
+    return (
+      await tx.getByColumns('search_document', {
+        entity_type: entityType,
+        entity_id: entityId,
+      })
+    )[0];
   }
 
   private async nextSearchId(tx: PortableTransaction): Promise<number> {
-    const docs = await tx.getAll('search_document');
-    return docs.reduce((max, doc) => Math.max(max, Number(doc.id ?? 0)), 0) + 1;
+    return this.nextSequence(tx, 'search_document', 'id');
   }
 
   private async buildSearchText(
@@ -1047,55 +1497,85 @@ export class PortableLawOffice {
     entityType: string,
     row: EngineRow,
   ): Promise<{ title: string; subtitle: string | null; body: string } | null> {
-    const text = (value: unknown): string => (value === null || value === undefined ? '' : String(value));
+    const text = (value: unknown): string =>
+      value === null || value === undefined ? '' : String(value);
     switch (entityType) {
       case 'party': {
-        const contacts = (await tx.getAll('party_contact')).filter((contact) => contact.party_id === row.id && contact.deleted_at === null);
-        const aliases = (await tx.getAll('party_alias')).filter((alias) => alias.party_id === row.id && alias.deleted_at === null);
+        const contacts = (
+          await tx.getByColumns('party_contact', { party_id: String(row.id) })
+        ).filter((contact) => contact.deleted_at === null);
+        const aliases = (
+          await tx.getByColumns('party_alias', { party_id: String(row.id) })
+        ).filter((alias) => alias.deleted_at === null);
         return {
           title: text(row.display_name),
           subtitle: null,
-          body: [text(row.notes), ...aliases.map((alias) => text(alias.alias)), ...contacts.map((contact) => text(contact.value))].join(' '),
+          body: [
+            text(row.notes),
+            ...aliases.map((alias) => text(alias.alias)),
+            ...contacts.map((contact) => text(contact.value)),
+          ].join(' '),
         };
       }
       case 'case_file':
-        return {
-          title: text(row.title),
-          subtitle: text(row.file_number),
-          body: [text(row.description), text(row.file_number)].join(' '),
-        };
-      case 'legal_case': {
-        const court = row.court_id ? await tx.get('court', String(row.court_id)) : undefined;
-        return {
-          title: `${text(row.case_number)} / ${text(row.case_year)}`,
-          subtitle: text(court?.name),
-          body: [text(row.subject), text(row.notes)].join(' '),
-        };
-      }
+      case 'legal_case':
+        return buildCaseProjection(tx, entityType, row);
       case 'court':
-        return { title: text(row.name), subtitle: null, body: text(row.address) };
+        return {
+          title: text(row.name),
+          subtitle: null,
+          body: [text(row.address), text(row.aliases_json)].join(' '),
+        };
       case 'hearing':
         return {
           title: `جلسة ${text(row.scheduled_at)}`,
           subtitle: null,
-          body: [text(row.purpose), text(row.outcome_summary), text(row.notes)].join(' '),
+          body: [
+            text(row.purpose),
+            text(row.outcome_summary),
+            text(row.notes),
+          ].join(' '),
         };
       case 'judgment':
         return {
           title: `حكم ${text(row.judgment_number)}`,
           subtitle: text(row.issued_on),
-          body: [text(row.operative_part), text(row.reasoning), text(row.notes)].join(' '),
+          body: [
+            text(row.operative_part),
+            text(row.reasoning),
+            text(row.notes),
+          ].join(' '),
         };
       case 'task':
-        return { title: text(row.title), subtitle: null, body: [text(row.description), text(row.notes)].join(' ') };
+        return {
+          title: text(row.title),
+          subtitle: null,
+          body: [text(row.description), text(row.notes)].join(' '),
+        };
       case 'document':
-        return { title: text(row.title), subtitle: text(row.doc_number), body: [text(row.notes), text(row.external_ref)].join(' ') };
+        return {
+          title: text(row.title),
+          subtitle: text(row.doc_number),
+          body: [text(row.notes), text(row.external_ref)].join(' '),
+        };
       case 'contract':
-        return { title: text(row.title), subtitle: text(row.contract_number), body: text(row.notes) };
+        return {
+          title: text(row.title),
+          subtitle: text(row.contract_number),
+          body: text(row.notes),
+        };
       case 'power_of_attorney':
-        return { title: text(row.poa_number), subtitle: null, body: [text(row.scope), text(row.notes)].join(' ') };
+        return {
+          title: text(row.poa_number),
+          subtitle: null,
+          body: [text(row.scope), text(row.notes)].join(' '),
+        };
       case 'appointment':
-        return { title: text(row.title), subtitle: text(row.start_at), body: text(row.notes) };
+        return {
+          title: text(row.title),
+          subtitle: text(row.start_at),
+          body: text(row.notes),
+        };
       default:
         return null;
     }
@@ -1114,51 +1594,177 @@ export class PortableLawOffice {
     options: { entityType?: string; limit?: number; offset?: number } = {},
   ): Promise<{ hits: SearchHit[]; total: number }> {
     const normalized = normalizeArabic(query);
-    const tokens = [...new Set(normalized.split(/\s+/).filter(Boolean))].slice(0, 20);
+    const tokens = [...new Set(normalized.split(/\s+/).filter(Boolean))];
     if (tokens.length === 0) return { hits: [], total: 0 };
-    let docs = await this.conn.getAll('search_document');
-    if (options.entityType) docs = docs.filter((doc) => doc.entity_type === options.entityType);
-    const hits = docs
-      .filter((doc) => tokens.every((token) => String(doc.normalized_text).includes(token)))
-      .map((doc) => {
-        const body = String(doc.normalized_text);
-        const position = body.indexOf(tokens[0]!);
-        const start = Math.max(0, position - 30);
-        return {
-          entityType: String(doc.entity_type),
-          entityId: String(doc.entity_id),
-          title: String(doc.title),
-          subtitle: doc.subtitle === null ? null : String(doc.subtitle),
-          snippet: `${start > 0 ? '…' : ''}${body.slice(start, start + 90)}${body.length > start + 90 ? '…' : ''}`,
-          rank: position,
-        };
-      })
-      .sort((left, right) => left.rank - right.rank || left.title.localeCompare(right.title));
-    const offset = Math.max(0, Math.trunc(options.offset ?? 0));
-    const limit = Math.max(1, Math.min(200, Math.trunc(options.limit ?? 20)));
+    const page = await this.store.query('search_document', {
+      filters: [
+        ...(options.entityType
+          ? [
+              {
+                column: 'entity_type',
+                op: 'eq' as const,
+                value: options.entityType,
+              },
+            ]
+          : []),
+        ...tokens.map((token) => ({
+          column: 'normalized_text',
+          op: 'contains' as const,
+          value: token,
+        })),
+      ],
+      orderBy: [{ column: 'updated_at', direction: 'desc' }],
+      limit: Math.min(200, options.limit ?? 20),
+      offset: options.offset ?? 0,
+    });
     return {
-      hits: hits.slice(offset, offset + limit).map((hit, index) => ({ ...hit, rank: index })),
-      total: hits.length,
+      total: page.total,
+      hits: page.rows.map((doc, index) => ({
+        entityType: String(doc.entity_type),
+        entityId: String(doc.entity_id),
+        title: String(doc.title),
+        subtitle: doc.subtitle === null ? null : String(doc.subtitle),
+        snippet: String(doc.normalized_text).slice(0, 120),
+        rank: index,
+      })),
     };
   }
 
-  async rebuildSearch(): Promise<{ documents: number }> {
-    await this.store.clear('search_document');
-    const entities = ['party', 'case_file', 'legal_case', 'court', 'hearing', 'judgment', 'task', 'document', 'contract', 'power_of_attorney', 'appointment'];
-    for (const entityType of entities) {
-      const definition = tryGetSyncEntity(entityType);
-      if (!definition) continue;
-      for (const row of await this.conn.getAll(definition.table)) {
-        if (row.deleted_at === null) {
-          await this.store.transaction(['search_document', definition.table], async (tx) => {
-            await this.refreshSearch(tx, entityType, String(row[definition.primaryKeyColumn]));
+  private async nextSequence(
+    tx: PortableTransaction,
+    table: string,
+    column: string,
+  ): Promise<number> {
+    const key = `sequence.${table}`;
+    const old = await tx.get('app_meta', key);
+    const next =
+      (old ? Number(old.value) : await tx.maximum(table, column)) + 1;
+    await tx.put('app_meta', toAppMeta(key, String(next), this.now()));
+    return next;
+  }
+  private markSearch(
+    type: string,
+    table: string,
+    row: EngineRow,
+    previous?: EngineRow,
+  ): void {
+    this.pendingSearch.set(`${type}:${String(row.id ?? row.party_id)}`, {
+      type,
+      id: String(row.id ?? row.party_id),
+    });
+    this.pendingMutations.push({
+      table,
+      row,
+      ...(previous ? { previous } : {}),
+    });
+  }
+  private async flushSearch(tx: PortableTransaction): Promise<void> {
+    for (const m of this.pendingMutations)
+      for (const affected of await affectedCaseRecords(
+        tx,
+        m.table,
+        m.row,
+        m.previous,
+      ))
+        this.pendingSearch.set(`${affected.type}:${affected.id}`, affected);
+    for (const item of this.pendingSearch.values())
+      await this.refreshSearch(tx, item.type, item.id);
+  }
+  async queryCaseIndex(options: QueryOptions = {}): Promise<QueryPage> {
+    return this.store.query('search_document', options);
+  }
+  private async rebuildIndexEntities(types: readonly string[]): Promise<void> {
+    for (const type of types) {
+      const total = await this.store.count(
+        this.tableFor(type).definition.table,
+      );
+      let processed = 0;
+      for await (const rows of this.store.scan(
+        this.tableFor(type).definition.table,
+        { pageSize: 500 },
+      )) {
+        await this.store.transaction(
+          this.schema.tables.map((t) => t.name),
+          async (tx) => {
+            for (const row of rows)
+              await this.refreshSearch(tx, type, String(row.id));
+          },
+        );
+        processed += rows.length;
+        try {
+          this.pendingOptions.onIndexProgress?.({
+            entity: type,
+            processed,
+            total,
           });
+        } catch {
+          /* Observers cannot roll back committed batches. */
         }
       }
+      if (total === 0)
+        try {
+          this.pendingOptions.onIndexProgress?.({
+            entity: type,
+            processed,
+            total,
+          });
+        } catch {
+          /* Non-critical UI observer. */
+        }
     }
-    return { documents: await this.conn.count('search_document') };
   }
-
+  async rebuildCaseIndex(): Promise<{ documents: number }> {
+    await this.store.transaction(['app_meta'], async (tx) => {
+      await tx.put(
+        'app_meta',
+        toAppMeta('cases.index_version', '0', this.now()),
+      );
+    });
+    await this.rebuildIndexEntities(['case_file', 'legal_case']);
+    await this.store.transaction(['app_meta'], async (tx) => {
+      await tx.put(
+        'app_meta',
+        toAppMeta('cases.index_version', '2', this.now()),
+      );
+    });
+    return { documents: await this.store.count('search_document') };
+  }
+  async rebuildSearch(): Promise<{ documents: number }> {
+    await this.store.transaction(['app_meta'], async (tx) => {
+      await tx.put(
+        'app_meta',
+        toAppMeta('search.rebuild_pending', '1', this.now()),
+      );
+      await tx.put(
+        'app_meta',
+        toAppMeta('cases.index_version', '0', this.now()),
+      );
+    });
+    await this.rebuildIndexEntities([
+      'party',
+      'case_file',
+      'legal_case',
+      'court',
+      'hearing',
+      'judgment',
+      'task',
+      'document',
+      'contract',
+      'power_of_attorney',
+      'appointment',
+    ]);
+    await this.store.transaction(['app_meta'], async (tx) => {
+      await tx.put(
+        'app_meta',
+        toAppMeta('cases.index_version', '2', this.now()),
+      );
+      await tx.put(
+        'app_meta',
+        toAppMeta('search.rebuild_pending', '0', this.now()),
+      );
+    });
+    return { documents: await this.store.count('search_document') };
+  }
 
   // ---------------------------------------------------------------------
   // Domain operations (same semantics on both engines)
@@ -1168,9 +1774,14 @@ export class PortableLawOffice {
     return String((await this.lookup(listCode, code)).id);
   }
 
-  async createPerson(input: CreatePersonInput, options: { client?: boolean } = {}): Promise<Record<string, unknown>> {
-    if (!input.firstName?.trim()) throw new ValidationError('first name is required');
-    if (!input.lastName?.trim()) throw new ValidationError('last name is required');
+  async createPerson(
+    input: CreatePersonInput,
+    options: { client?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    if (!input.firstName?.trim())
+      throw new ValidationError('first name is required');
+    if (!input.lastName?.trim())
+      throw new ValidationError('last name is required');
     const displayName = [input.firstName, input.middleName, input.lastName]
       .filter((part) => part && part.trim())
       .join(' ')
@@ -1215,21 +1826,28 @@ export class PortableLawOffice {
         );
       }
       await this.refreshPartySearch(tx, String(party.id));
-      return (await this.getPartyFull(String(party.id)))! as unknown as Record<string, unknown>;
+      return (await this.getPartyFull(String(party.id)))! as unknown as Record<
+        string,
+        unknown
+      >;
     });
   }
 
-  async createOrganization(input: {
-    legalName: string;
-    tradeName?: string;
-    legalFormCode?: string;
-    commercialRegistryNo?: string;
-    taxId?: string;
-    establishedOn?: string;
-    registryOffice?: string;
-    notes?: string;
-  }, options: { client?: boolean } = {}): Promise<Record<string, unknown>> {
-    if (!input.legalName?.trim()) throw new ValidationError('legal name is required');
+  async createOrganization(
+    input: {
+      legalName: string;
+      tradeName?: string;
+      legalFormCode?: string;
+      commercialRegistryNo?: string;
+      taxId?: string;
+      establishedOn?: string;
+      registryOffice?: string;
+      notes?: string;
+    },
+    options: { client?: boolean } = {},
+  ): Promise<Record<string, unknown>> {
+    if (!input.legalName?.trim())
+      throw new ValidationError('legal name is required');
     const displayName = input.tradeName?.trim() || input.legalName.trim();
     return this.transaction(async (tx) => {
       const party = await this.insert('party', {
@@ -1258,7 +1876,10 @@ export class PortableLawOffice {
         await this.ensureClientProfile(String(party.id));
       }
       await this.refreshPartySearch(tx, String(party.id));
-      return (await this.getPartyFull(String(party.id)))! as unknown as Record<string, unknown>;
+      return (await this.getPartyFull(String(party.id)))! as unknown as Record<
+        string,
+        unknown
+      >;
     });
   }
 
@@ -1284,7 +1905,10 @@ export class PortableLawOffice {
     });
   }
 
-  private async refreshPartySearch(tx: PortableTransaction, partyId: string): Promise<void> {
+  private async refreshPartySearch(
+    tx: PortableTransaction,
+    partyId: string,
+  ): Promise<void> {
     await this.refreshSearch(tx, 'party', partyId);
   }
 
@@ -1294,12 +1918,12 @@ export class PortableLawOffice {
     const person = await this.conn.get('person', partyId);
     const organization = await this.conn.get('organization', partyId);
     const client = await this.conn.get('client_profile', partyId);
-    const contacts = (await this.conn.getByColumns('party_contact', { party_id: partyId })).filter(
-      (row) => row.deleted_at === null,
-    );
-    const addresses = (await this.conn.getByColumns('party_address', { party_id: partyId })).filter(
-      (row) => row.deleted_at === null,
-    );
+    const contacts = (
+      await this.conn.getByColumns('party_contact', { party_id: partyId })
+    ).filter((row) => row.deleted_at === null);
+    const addresses = (
+      await this.conn.getByColumns('party_address', { party_id: partyId })
+    ).filter((row) => row.deleted_at === null);
     return {
       party,
       person: person?.deleted_at === null ? person : null,
@@ -1310,8 +1934,12 @@ export class PortableLawOffice {
     };
   }
 
-  async addContact(partyId: string, input: { typeCode: string; value: string; isPrimary?: boolean }): Promise<EngineRow> {
-    if (!input.value?.trim()) throw new ValidationError('contact value is required');
+  async addContact(
+    partyId: string,
+    input: { typeCode: string; value: string; isPrimary?: boolean },
+  ): Promise<EngineRow> {
+    if (!input.value?.trim())
+      throw new ValidationError('contact value is required');
     return this.transaction(async () => {
       const contact = await this.insert('party_contact', {
         party_id: partyId,
@@ -1325,12 +1953,17 @@ export class PortableLawOffice {
     });
   }
 
-  async addAddress(partyId: string, input: { city?: string; street?: string; governorateCode?: string }): Promise<EngineRow> {
+  async addAddress(
+    partyId: string,
+    input: { city?: string; street?: string; governorateCode?: string },
+  ): Promise<EngineRow> {
     return this.insert('party_address', {
       party_id: partyId,
       address_type_id: null,
       country: 'EG',
-      governorate_id: input.governorateCode ? await this.lookupId('governorate', input.governorateCode) : null,
+      governorate_id: input.governorateCode
+        ? await this.lookupId('governorate', input.governorateCode)
+        : null,
       city: input.city ?? null,
       district: null,
       street: input.street ?? null,
@@ -1343,11 +1976,18 @@ export class PortableLawOffice {
     });
   }
 
-  async createCourt(input: { name: string; courtKindCode?: string }): Promise<EngineRow> {
-    if (!input.name?.trim()) throw new ValidationError('court name is required');
+  async createCourt(input: {
+    name: string;
+    courtKindCode?: string;
+  }): Promise<EngineRow> {
+    if (!input.name?.trim())
+      throw new ValidationError('court name is required');
     return this.insert('court', {
       name: input.name.trim(),
-      court_kind_id: await this.lookupId('court_kind', input.courtKindCode ?? 'primary'),
+      court_kind_id: await this.lookupId(
+        'court_kind',
+        input.courtKindCode ?? 'primary',
+      ),
       parent_id: null,
       governorate_id: null,
       address: null,
@@ -1366,30 +2006,40 @@ export class PortableLawOffice {
     openedOn?: string;
     description?: string;
   }): Promise<EngineRow> {
-    if (!input.title?.trim()) throw new ValidationError('file title is required');
+    if (!input.title?.trim())
+      throw new ValidationError('file title is required');
     return this.transaction(async (tx) => {
       const id = newId();
       const fileNumber = (await this.nextNumber('file.number')).formatted;
-      const file = await this.insert('case_file', {
-        file_number: fileNumber,
-        title: input.title.trim(),
-        file_type_id: await this.lookupId('file_type', input.fileTypeCode ?? 'primary'),
-        practice_area_id: input.practiceAreaCode
-          ? await this.lookupId('practice_area', input.practiceAreaCode)
-          : null,
-        status_id: await this.lookupId('file_status', 'open'),
-        priority_id: null,
-        confidentiality_id: null,
-        responsible_party_id: null,
-        parent_file_id: null,
-        root_file_id: null,
-        opened_on: input.openedOn ?? this.now().slice(0, 10),
-        closed_on: null,
-        description: input.description ?? null,
-        archived_at: null,
-      }, { id });
+      const file = await this.insert(
+        'case_file',
+        {
+          file_number: fileNumber,
+          title: input.title.trim(),
+          file_type_id: await this.lookupId(
+            'file_type',
+            input.fileTypeCode ?? 'primary',
+          ),
+          practice_area_id: input.practiceAreaCode
+            ? await this.lookupId('practice_area', input.practiceAreaCode)
+            : null,
+          status_id: await this.lookupId('file_status', 'open'),
+          priority_id: null,
+          confidentiality_id: null,
+          responsible_party_id: null,
+          parent_file_id: null,
+          root_file_id: null,
+          opened_on: input.openedOn ?? this.now().slice(0, 10),
+          closed_on: null,
+          description: input.description ?? null,
+          archived_at: null,
+        },
+        { id },
+      );
       void tx;
-      for (const [index, partyId] of [...new Set(input.clientPartyIds ?? [])].entries()) {
+      for (const [index, partyId] of [
+        ...new Set(input.clientPartyIds ?? []),
+      ].entries()) {
         await this.addFileParty({
           fileId: String(file.id),
           partyId,
@@ -1411,24 +2061,37 @@ export class PortableLawOffice {
     startDate?: string;
     endDate?: string;
   }): Promise<EngineRow> {
-    const rows = await this.conn.getByColumns('case_file_party', { file_id: input.fileId });
+    const rows = await this.conn.getByColumns('case_file_party', {
+      file_id: input.fileId,
+    });
     const active = rows.filter((row) => row.deleted_at === null);
     const roleId = await this.lookupId('party_role', input.roleCode);
-    if (active.some((row) => row.party_id === input.partyId && row.role_id === roleId)) {
-      throw new ConflictError('party already has this role in the file', 'ALREADY_EXISTS', {
-        fileId: input.fileId,
-        partyId: input.partyId,
-        role: input.roleCode,
-      });
+    if (
+      active.some(
+        (row) => row.party_id === input.partyId && row.role_id === roleId,
+      )
+    ) {
+      throw new ConflictError(
+        'party already has this role in the file',
+        'ALREADY_EXISTS',
+        {
+          fileId: input.fileId,
+          partyId: input.partyId,
+          role: input.roleCode,
+        },
+      );
     }
     const ordinal =
-      active.reduce((max, row) => Math.max(max, Number(row.ordinal ?? 0)), 0) + 10;
+      active.reduce((max, row) => Math.max(max, Number(row.ordinal ?? 0)), 0) +
+      10;
     return this.insert('case_file_party', {
       file_id: input.fileId,
       case_id: null,
       party_id: input.partyId,
       role_id: roleId,
-      side_id: input.sideCode ? await this.lookupId('party_side', input.sideCode) : null,
+      side_id: input.sideCode
+        ? await this.lookupId('party_side', input.sideCode)
+        : null,
       ordinal,
       is_primary: input.isPrimary ? 1 : 0,
       start_date: input.startDate ?? null,
@@ -1440,51 +2103,63 @@ export class PortableLawOffice {
   async getFileFull(fileId: string): Promise<PortableFileFull | null> {
     const file = await this.get('case_file', fileId);
     if (!file) return null;
-    const links = (await this.conn.getByColumns('case_file_party', { file_id: fileId })).filter(
-      (row) => row.deleted_at === null,
-    );
+    const links = (
+      await this.conn.getByColumns('case_file_party', { file_id: fileId })
+    ).filter((row) => row.deleted_at === null);
     const parties: EngineRow[] = [];
     for (const link of links) {
       const party = await this.conn.get('party', String(link.party_id));
       const role = await this.conn.get('lookup_item', String(link.role_id));
-      if (party) parties.push({ ...link, display_name: party.display_name ?? null, role_name: role?.name_ar ?? null });
+      if (party)
+        parties.push({
+          ...link,
+          display_name: party.display_name ?? null,
+          role_name: role?.name_ar ?? null,
+        });
     }
-    const caseLinks = (await this.conn.getByColumns('case_file_case', { file_id: fileId })).filter(
-      (row) => row.deleted_at === null,
-    );
+    const caseLinks = (
+      await this.conn.getByColumns('case_file_case', { file_id: fileId })
+    ).filter((row) => row.deleted_at === null);
     const relatedCases: EngineRow[] = [];
     for (const link of caseLinks) {
       const legalCase = await this.conn.get('legal_case', String(link.case_id));
       if (legalCase) relatedCases.push(legalCase);
     }
-    const subFiles = (await this.conn.getByColumns('case_file', { parent_file_id: fileId })).filter(
-      (row) => row.deleted_at === null,
-    );
+    const subFiles = (
+      await this.conn.getByColumns('case_file', { parent_file_id: fileId })
+    ).filter((row) => row.deleted_at === null);
     return { file, parties, cases: relatedCases, subFiles };
   }
 
-  async createSubFile(parentFileId: string, input: { title: string; practiceAreaCode?: string }): Promise<EngineRow> {
+  async createSubFile(
+    parentFileId: string,
+    input: { title: string; practiceAreaCode?: string },
+  ): Promise<EngineRow> {
     const parent = await this.require('case_file', parentFileId);
     const id = newId();
     const fileNumber = (await this.nextNumber('file.number')).formatted;
-    return this.insert('case_file', {
-      file_number: fileNumber,
-      title: input.title.trim(),
-      file_type_id: await this.lookupId('file_type', 'sub'),
-      practice_area_id: input.practiceAreaCode
-        ? await this.lookupId('practice_area', input.practiceAreaCode)
-        : null,
-      status_id: await this.lookupId('file_status', 'open'),
-      priority_id: null,
-      confidentiality_id: null,
-      responsible_party_id: null,
-      parent_file_id: parentFileId,
-      root_file_id: String(parent.root_file_id ?? parent.id),
-      opened_on: this.now().slice(0, 10),
-      closed_on: null,
-      description: null,
-      archived_at: null,
-    }, { id });
+    return this.insert(
+      'case_file',
+      {
+        file_number: fileNumber,
+        title: input.title.trim(),
+        file_type_id: await this.lookupId('file_type', 'sub'),
+        practice_area_id: input.practiceAreaCode
+          ? await this.lookupId('practice_area', input.practiceAreaCode)
+          : null,
+        status_id: await this.lookupId('file_status', 'open'),
+        priority_id: null,
+        confidentiality_id: null,
+        responsible_party_id: null,
+        parent_file_id: parentFileId,
+        root_file_id: String(parent.root_file_id ?? parent.id),
+        opened_on: this.now().slice(0, 10),
+        closed_on: null,
+        description: null,
+        archived_at: null,
+      },
+      { id },
+    );
   }
 
   async createCase(input: {
@@ -1496,14 +2171,18 @@ export class PortableLawOffice {
     litigationDegreeCode?: string;
     subject?: string;
   }): Promise<EngineRow> {
-    if (!input.caseNumber?.trim()) throw new ValidationError('case number is required');
+    if (!input.caseNumber?.trim())
+      throw new ValidationError('case number is required');
     return this.transaction(async () => {
       const legalCase = await this.insert('legal_case', {
         court_id: input.courtId ?? null,
         circuit_id: null,
         case_number: input.caseNumber.trim(),
         case_year: input.caseYear,
-        case_type_id: await this.lookupId('case_type', input.caseTypeCode ?? 'civil'),
+        case_type_id: await this.lookupId(
+          'case_type',
+          input.caseTypeCode ?? 'civil',
+        ),
         litigation_degree_id: input.litigationDegreeCode
           ? await this.lookupId('litigation_degree', input.litigationDegreeCode)
           : null,
@@ -1515,16 +2194,18 @@ export class PortableLawOffice {
         notes: null,
         archived_at: null,
       });
-      for (const fileId of input.fileIds ?? []) await this.linkCase(String(legalCase.id), fileId);
+      for (const fileId of input.fileIds ?? [])
+        await this.linkCase(String(legalCase.id), fileId);
       return legalCase;
     });
   }
 
   async linkCase(caseId: string, fileId: string): Promise<EngineRow> {
-    const existing = (await this.conn.getByColumns('case_file_case', { case_id: caseId })).filter(
-      (row) => row.file_id === fileId && row.deleted_at === null,
-    );
-    if (existing.length > 0) throw new ConflictError('case already linked to file', 'ALREADY_EXISTS');
+    const existing = (
+      await this.conn.getByColumns('case_file_case', { case_id: caseId })
+    ).filter((row) => row.file_id === fileId && row.deleted_at === null);
+    if (existing.length > 0)
+      throw new ConflictError('case already linked to file', 'ALREADY_EXISTS');
     return this.insert('case_file_case', {
       file_id: fileId,
       case_id: caseId,
@@ -1534,22 +2215,31 @@ export class PortableLawOffice {
     });
   }
 
-  async getCaseFull(caseId: string): Promise<{ legalCase: EngineRow; files: EngineRow[]; hearings: EngineRow[]; judgments: EngineRow[] }> {
+  async getCaseFull(caseId: string): Promise<{
+    legalCase: EngineRow;
+    files: EngineRow[];
+    hearings: EngineRow[];
+    judgments: EngineRow[];
+  }> {
     const legalCase = await this.require('legal_case', caseId);
-    const links = (await this.conn.getByColumns('case_file_case', { case_id: caseId })).filter(
-      (row) => row.deleted_at === null,
-    );
+    const links = (
+      await this.conn.getByColumns('case_file_case', { case_id: caseId })
+    ).filter((row) => row.deleted_at === null);
     const files: EngineRow[] = [];
     for (const link of links) {
       const file = await this.conn.get('case_file', String(link.file_id));
       if (file && file.deleted_at === null) files.push(file);
     }
-    const hearings = (await this.conn.getByColumns('hearing', { case_id: caseId }))
+    const hearings = (
+      await this.conn.getByColumns('hearing', { case_id: caseId })
+    )
       .filter((row) => row.deleted_at === null)
-      .sort((left, right) => String(left.scheduled_at).localeCompare(String(right.scheduled_at)));
-    const judgments = (await this.conn.getByColumns('judgment', { case_id: caseId })).filter(
-      (row) => row.deleted_at === null,
-    );
+      .sort((left, right) =>
+        String(left.scheduled_at).localeCompare(String(right.scheduled_at)),
+      );
+    const judgments = (
+      await this.conn.getByColumns('judgment', { case_id: caseId })
+    ).filter((row) => row.deleted_at === null);
     return { legalCase, files, hearings, judgments };
   }
 
@@ -1566,7 +2256,9 @@ export class PortableLawOffice {
       circuit_id: legalCase.circuit_id ?? null,
       scheduled_at: input.scheduledAt,
       timezone: 'Africa/Cairo',
-      purpose: input.purposeCode ? await this.lookupId('hearing_purpose', input.purposeCode) : null,
+      purpose: input.purposeCode
+        ? await this.lookupId('hearing_purpose', input.purposeCode)
+        : null,
       status_id: await this.lookupId('hearing_status', 'scheduled'),
       held_at: null,
       outcome_summary: null,
@@ -1578,7 +2270,10 @@ export class PortableLawOffice {
     });
   }
 
-  async recordHearing(hearingId: string, input: { statusCode?: string; heldAt?: string; outcomeSummary?: string }): Promise<EngineRow> {
+  async recordHearing(
+    hearingId: string,
+    input: { statusCode?: string; heldAt?: string; outcomeSummary?: string },
+  ): Promise<EngineRow> {
     const statusCode = input.statusCode ?? 'held';
     const patch: Record<string, unknown> = {
       status_id: await this.lookupId('hearing_status', statusCode),
@@ -1588,10 +2283,15 @@ export class PortableLawOffice {
     return this.update('hearing', hearingId, patch);
   }
 
-  async scheduleNextHearing(previousHearingId: string, input: { scheduledAt: string }): Promise<EngineRow> {
+  async scheduleNextHearing(
+    previousHearingId: string,
+    input: { scheduledAt: string },
+  ): Promise<EngineRow> {
     const previous = await this.require('hearing', previousHearingId);
     if (input.scheduledAt <= String(previous.scheduled_at)) {
-      throw new ValidationError('next hearing must be scheduled after the previous hearing');
+      throw new ValidationError(
+        'next hearing must be scheduled after the previous hearing',
+      );
     }
     return this.transaction(async () => {
       const next = await this.scheduleHearing({
@@ -1599,7 +2299,9 @@ export class PortableLawOffice {
         scheduledAt: input.scheduledAt,
         ...(previous.purpose ? { purposeCode: String(previous.purpose) } : {}),
       });
-      await this.update('hearing', previousHearingId, { next_hearing_id: String(next.id) });
+      await this.update('hearing', previousHearingId, {
+        next_hearing_id: String(next.id),
+      });
       return next;
     });
   }
@@ -1621,7 +2323,10 @@ export class PortableLawOffice {
         court_id: legalCase.court_id ?? null,
         judgment_number: null,
         issued_on: input.issuedOn,
-        judgment_type_id: await this.lookupId('judgment_type', input.judgmentTypeCode ?? 'preliminary'),
+        judgment_type_id: await this.lookupId(
+          'judgment_type',
+          input.judgmentTypeCode ?? 'preliminary',
+        ),
         status_id: await this.lookupId('judgment_status', 'issued'),
         operative_part: input.operativePart ?? null,
         reasoning: input.reasoning ?? null,
@@ -1642,11 +2347,15 @@ export class PortableLawOffice {
     });
   }
 
-  async getJudgmentFull(judgmentId: string): Promise<{ judgment: EngineRow; files: EngineRow[] }> {
+  async getJudgmentFull(
+    judgmentId: string,
+  ): Promise<{ judgment: EngineRow; files: EngineRow[] }> {
     const judgment = await this.require('judgment', judgmentId);
-    const links = (await this.conn.getByColumns('judgment_file_link', { judgment_id: judgmentId })).filter(
-      (row) => row.deleted_at === null,
-    );
+    const links = (
+      await this.conn.getByColumns('judgment_file_link', {
+        judgment_id: judgmentId,
+      })
+    ).filter((row) => row.deleted_at === null);
     const files: EngineRow[] = [];
     for (const link of links) {
       const file = await this.conn.get('case_file', String(link.file_id));
@@ -1660,20 +2369,28 @@ export class PortableLawOffice {
     taskTypeCode?: string;
     fileId?: string;
     caseId?: string;
+    stageId?: string;
     hearingId?: string;
     judgmentId?: string;
     dueAt?: string;
     description?: string;
   }): Promise<EngineRow> {
-    if (!input.title?.trim()) throw new ValidationError('task title is required');
+    if (!input.title?.trim())
+      throw new ValidationError('task title is required');
+    const stage = input.stageId
+      ? await this.require('procedural_stage', input.stageId)
+      : null;
     return this.insert('task', {
+      stage_id: input.stageId ?? null,
       title: input.title.trim(),
       description: input.description ?? null,
-      task_type_id: input.taskTypeCode ? await this.lookupId('task_type', input.taskTypeCode) : null,
+      task_type_id: input.taskTypeCode
+        ? await this.lookupId('task_type', input.taskTypeCode)
+        : null,
       status_id: await this.lookupId('task_status', 'open'),
       priority_id: await this.lookupId('priority', 'normal'),
-      file_id: input.fileId ?? null,
-      case_id: input.caseId ?? null,
+      file_id: input.fileId ?? stage?.file_id ?? null,
+      case_id: input.caseId ?? stage?.case_id ?? null,
       hearing_id: input.hearingId ?? null,
       judgment_id: input.judgmentId ?? null,
       client_party_id: null,
@@ -1702,13 +2419,15 @@ export class PortableLawOffice {
       if (statusCode === 'completed') {
         patch.completed_at = this.now();
         patch.cancelled_at = null;
-        if (options.resultSummary !== undefined) patch.result_summary = options.resultSummary;
+        if (options.resultSummary !== undefined)
+          patch.result_summary = options.resultSummary;
       } else if (statusCode === 'cancelled') {
         patch.cancelled_at = this.now();
       } else if (statusCode === 'in_progress') {
         patch.started_at = task.started_at ?? this.now();
       } else if (statusCode === 'blocked' || statusCode === 'waiting') {
-        patch.suspension_reason = options.suspensionReason ?? task.suspension_reason ?? null;
+        patch.suspension_reason =
+          options.suspensionReason ?? task.suspension_reason ?? null;
       }
       const updated = await this.update('task', taskId, patch);
       await this.insert('task_status_history', {
@@ -1723,10 +2442,14 @@ export class PortableLawOffice {
     });
   }
 
-  async getTaskFull(taskId: string): Promise<{ task: EngineRow; statusHistory: EngineRow[] }> {
+  async getTaskFull(
+    taskId: string,
+  ): Promise<{ task: EngineRow; statusHistory: EngineRow[] }> {
     const task = await this.require('task', taskId);
-    const statusHistory = (await this.conn.getByColumns('task_status_history', { task_id: taskId })).sort(
-      (left, right) => String(left.changed_at).localeCompare(String(right.changed_at)),
+    const statusHistory = (
+      await this.conn.getByColumns('task_status_history', { task_id: taskId })
+    ).sort((left, right) =>
+      String(left.changed_at).localeCompare(String(right.changed_at)),
     );
     return { task, statusHistory };
   }
@@ -1740,11 +2463,15 @@ export class PortableLawOffice {
     caseId?: string;
     notes?: string;
   }): Promise<EngineRow> {
-    if (!input.title?.trim()) throw new ValidationError('document title is required');
+    if (!input.title?.trim())
+      throw new ValidationError('document title is required');
     return this.transaction(async () => {
       const document = await this.insert('document', {
         title: input.title.trim(),
-        doc_type_id: await this.lookupId('document_type', input.docTypeCode ?? 'other'),
+        doc_type_id: await this.lookupId(
+          'document_type',
+          input.docTypeCode ?? 'other',
+        ),
         doc_number: input.docNumber ?? null,
         doc_date: input.docDate ?? null,
         source_party_id: null,
@@ -1756,8 +2483,16 @@ export class PortableLawOffice {
         notes: input.notes ?? null,
         archived_at: null,
       });
-      if (input.fileId) await this.linkDocument(String(document.id), { kind: 'file', id: input.fileId });
-      if (input.caseId) await this.linkDocument(String(document.id), { kind: 'case', id: input.caseId });
+      if (input.fileId)
+        await this.linkDocument(String(document.id), {
+          kind: 'file',
+          id: input.fileId,
+        });
+      if (input.caseId)
+        await this.linkDocument(String(document.id), {
+          kind: 'case',
+          id: input.caseId,
+        });
       return document;
     });
   }
@@ -1773,10 +2508,18 @@ export class PortableLawOffice {
     },
   ): Promise<EngineRow> {
     if (input.storageKind === 'local_file' && !input.fileName?.trim()) {
-      throw new ValidationError('fileName is required for a local file version');
+      throw new ValidationError(
+        'fileName is required for a local file version',
+      );
     }
-    const versions = await this.conn.getByColumns('document_version', { document_id: documentId });
-    const versionNo = versions.reduce((max, row) => Math.max(max, Number(row.version_no ?? 0)), 0) + 1;
+    const versions = await this.conn.getByColumns('document_version', {
+      document_id: documentId,
+    });
+    const versionNo =
+      versions.reduce(
+        (max, row) => Math.max(max, Number(row.version_no ?? 0)),
+        0,
+      ) + 1;
     return this.transaction(async () => {
       const version = await this.insert('document_version', {
         document_id: documentId,
@@ -1798,8 +2541,23 @@ export class PortableLawOffice {
     });
   }
 
-  async linkDocument(documentId: string, target: { kind: 'file' | 'case' | 'hearing' | 'judgment' | 'contract' | 'poa' | 'party' | 'task'; id: string }): Promise<EngineRow> {
-    const column = target.kind === 'poa' ? 'power_of_attorney_id' : `${target.kind}_id`;
+  async linkDocument(
+    documentId: string,
+    target: {
+      kind:
+        | 'file'
+        | 'case'
+        | 'hearing'
+        | 'judgment'
+        | 'contract'
+        | 'poa'
+        | 'party'
+        | 'task';
+      id: string;
+    },
+  ): Promise<EngineRow> {
+    const column =
+      target.kind === 'poa' ? 'power_of_attorney_id' : `${target.kind}_id`;
     return this.insert('document_link', {
       document_id: documentId,
       file_id: null,
@@ -1815,10 +2573,17 @@ export class PortableLawOffice {
     });
   }
 
-  async createAccount(input: { name: string; kindCode?: string; openingBalanceMinor?: number }): Promise<EngineRow> {
+  async createAccount(input: {
+    name: string;
+    kindCode?: string;
+    openingBalanceMinor?: number;
+  }): Promise<EngineRow> {
     return this.insert('financial_account', {
       name: input.name.trim(),
-      account_kind_id: await this.lookupId('account_kind', input.kindCode ?? 'cash'),
+      account_kind_id: await this.lookupId(
+        'account_kind',
+        input.kindCode ?? 'cash',
+      ),
       currency_code: 'EGP',
       opening_balance_minor: input.openingBalanceMinor ?? 0,
       opened_on: this.now().slice(0, 10),
@@ -1834,7 +2599,8 @@ export class PortableLawOffice {
     amountMinor: number;
     dueOn?: string;
   }): Promise<EngineRow> {
-    if (!this.isPositiveMinor(input.amountMinor)) throw new ValidationError('charge amount must be positive');
+    if (!this.isPositiveMinor(input.amountMinor))
+      throw new ValidationError('charge amount must be positive');
     return this.insert('financial_charge', {
       client_party_id: input.clientPartyId,
       file_id: input.fileId ?? null,
@@ -1862,11 +2628,13 @@ export class PortableLawOffice {
     receiptNo?: string;
     reversesTransactionId?: string;
   }): Promise<EngineRow> {
-    if (!this.isPositiveMinor(input.amountMinor)) throw new ValidationError('amount must be positive');
-    if (input.direction !== 'in' && input.direction !== 'out') throw new ValidationError('invalid direction');
+    if (!this.isPositiveMinor(input.amountMinor))
+      throw new ValidationError('amount must be positive');
+    if (input.direction !== 'in' && input.direction !== 'out')
+      throw new ValidationError('invalid direction');
     const account = await this.require('financial_account', input.accountId);
     const receiptNo =
-      input.receiptNo ?? ((await this.nextNumber('receipt.number')).formatted);
+      input.receiptNo ?? (await this.nextNumber('receipt.number')).formatted;
     return this.insert('financial_transaction', {
       account_id: input.accountId,
       direction: input.direction,
@@ -1874,7 +2642,9 @@ export class PortableLawOffice {
       amount_minor: input.amountMinor,
       currency_code: String(account.currency_code),
       occurred_at: input.occurredAt ?? this.now(),
-      method_id: input.methodCode ? await this.lookupId('payment_method', input.methodCode) : null,
+      method_id: input.methodCode
+        ? await this.lookupId('payment_method', input.methodCode)
+        : null,
       reference_no: null,
       receipt_no: receiptNo,
       client_party_id: input.clientPartyId ?? null,
@@ -1889,19 +2659,35 @@ export class PortableLawOffice {
     });
   }
 
-  async allocate(transactionId: string, chargeId: string, amountMinor: number): Promise<EngineRow> {
-    if (!this.isPositiveMinor(amountMinor)) throw new ValidationError('allocation amount must be positive');
+  async allocate(
+    transactionId: string,
+    chargeId: string,
+    amountMinor: number,
+  ): Promise<EngineRow> {
+    if (!this.isPositiveMinor(amountMinor))
+      throw new ValidationError('allocation amount must be positive');
     return this.transaction(async () => {
-      const transaction = await this.require('financial_transaction', transactionId);
+      const transaction = await this.require(
+        'financial_transaction',
+        transactionId,
+      );
       const charge = await this.require('financial_charge', chargeId);
-      if (transaction.status !== 'posted') throw new ValidationError('cannot allocate a voided transaction');
-      const allocatedPayment = await this.sumAllocations('transaction_id', transactionId);
+      if (transaction.status !== 'posted')
+        throw new ValidationError('cannot allocate a voided transaction');
+      const allocatedPayment = await this.sumAllocations(
+        'transaction_id',
+        transactionId,
+      );
       const allocatedCharge = await this.sumAllocations('charge_id', chargeId);
       if (allocatedPayment + amountMinor > Number(transaction.amount_minor)) {
-        throw new ValidationError('amount exceeds the unallocated payment balance');
+        throw new ValidationError(
+          'amount exceeds the unallocated payment balance',
+        );
       }
       if (allocatedCharge + amountMinor > Number(charge.amount_minor)) {
-        throw new ValidationError('amount exceeds the outstanding charge balance');
+        throw new ValidationError(
+          'amount exceeds the outstanding charge balance',
+        );
       }
       const allocation = await this.insert('payment_allocation', {
         transaction_id: transactionId,
@@ -1910,7 +2696,8 @@ export class PortableLawOffice {
         notes: null,
       });
       const paid = allocatedCharge + amountMinor;
-      const statusCode = paid >= Number(charge.amount_minor) ? 'paid' : 'partially_paid';
+      const statusCode =
+        paid >= Number(charge.amount_minor) ? 'paid' : 'partially_paid';
       await this.update('financial_charge', chargeId, {
         status_id: await this.lookupId('charge_status', statusCode),
       });
@@ -1922,11 +2709,16 @@ export class PortableLawOffice {
     column: 'transaction_id' | 'charge_id',
     id: string,
   ): Promise<number> {
-    const rows = await this.conn.getByColumns('payment_allocation', { [column]: id });
+    const rows = await this.conn.getByColumns('payment_allocation', {
+      [column]: id,
+    });
     let total = 0;
     for (const row of rows) {
       if (row.deleted_at !== null) continue;
-      const transaction = await this.conn.get('financial_transaction', String(row.transaction_id));
+      const transaction = await this.conn.get(
+        'financial_transaction',
+        String(row.transaction_id),
+      );
       if (!transaction || transaction.status !== 'posted') continue;
       if (await this.isReversed(String(transaction.id))) continue;
       total += Number(row.amount_minor);
@@ -1938,25 +2730,36 @@ export class PortableLawOffice {
     const reversals = await this.conn.getByColumns('financial_transaction', {
       reverses_transaction_id: transactionId,
     });
-    return reversals.some((row) => row.status === 'posted' && row.deleted_at === null);
+    return reversals.some(
+      (row) => row.status === 'posted' && row.deleted_at === null,
+    );
   }
 
   async accountBalance(accountId: string): Promise<number> {
     const account = await this.require('financial_account', accountId);
-    const transactions = (await this.conn.getByColumns('financial_transaction', { account_id: accountId })).filter(
-      (row) => row.status === 'posted' && row.deleted_at === null,
-    );
+    const transactions = (
+      await this.conn.getByColumns('financial_transaction', {
+        account_id: accountId,
+      })
+    ).filter((row) => row.status === 'posted' && row.deleted_at === null);
     // Same rule as the SQLite engine: both the original posting and its
     // posted reversal count, so a reversal nets to zero instead of removing
     // the original only.
     let total = Number(account.opening_balance_minor ?? 0);
     for (const transaction of transactions) {
-      total += transaction.direction === 'in' ? Number(transaction.amount_minor) : -Number(transaction.amount_minor);
+      total +=
+        transaction.direction === 'in'
+          ? Number(transaction.amount_minor)
+          : -Number(transaction.amount_minor);
     }
     return total;
   }
 
-  async chargeBalance(chargeId: string): Promise<{ amountMinor: number; paidMinor: number; outstandingMinor: number }> {
+  async chargeBalance(chargeId: string): Promise<{
+    amountMinor: number;
+    paidMinor: number;
+    outstandingMinor: number;
+  }> {
     const charge = await this.require('financial_charge', chargeId);
     const paid = await this.sumAllocations('charge_id', chargeId);
     return {
@@ -1966,28 +2769,44 @@ export class PortableLawOffice {
     };
   }
 
-  async reverseTransaction(transactionId: string, reason: string): Promise<EngineRow> {
-    if (!reason?.trim()) throw new ValidationError('reversal reason is required');
+  async reverseTransaction(
+    transactionId: string,
+    reason: string,
+  ): Promise<EngineRow> {
+    if (!reason?.trim())
+      throw new ValidationError('reversal reason is required');
     const original = await this.require('financial_transaction', transactionId);
-    if (original.status !== 'posted') throw new ValidationError('only posted transactions can be reversed');
+    if (original.status !== 'posted')
+      throw new ValidationError('only posted transactions can be reversed');
     return this.transaction(async () => {
       const reversal = await this.postTransaction({
         accountId: String(original.account_id),
         direction: original.direction === 'in' ? 'out' : 'in',
         amountMinor: Number(original.amount_minor),
-        ...(original.client_party_id ? { clientPartyId: String(original.client_party_id) } : {}),
+        ...(original.client_party_id
+          ? { clientPartyId: String(original.client_party_id) }
+          : {}),
         ...(original.file_id ? { fileId: String(original.file_id) } : {}),
         reversesTransactionId: transactionId,
         description: `قيد عكسي: ${reason.trim()}`,
       });
-      const charges = (await this.conn.getByColumns('payment_allocation', { transaction_id: transactionId })).map(
-        (row) => String(row.charge_id),
-      );
+      const charges = (
+        await this.conn.getByColumns('payment_allocation', {
+          transaction_id: transactionId,
+        })
+      ).map((row) => String(row.charge_id));
       for (const chargeId of new Set(charges)) {
         const paid = await this.sumAllocations('charge_id', chargeId);
         const charge = await this.require('financial_charge', chargeId);
-        const code = paid <= 0 ? 'outstanding' : paid >= Number(charge.amount_minor) ? 'paid' : 'partially_paid';
-        await this.update('financial_charge', chargeId, { status_id: await this.lookupId('charge_status', code) });
+        const code =
+          paid <= 0
+            ? 'outstanding'
+            : paid >= Number(charge.amount_minor)
+              ? 'paid'
+              : 'partially_paid';
+        await this.update('financial_charge', chargeId, {
+          status_id: await this.lookupId('charge_status', code),
+        });
       }
       return reversal;
     });
@@ -1997,10 +2816,16 @@ export class PortableLawOffice {
     return Number.isSafeInteger(value) && value > 0;
   }
 
-  async healthCheck(): Promise<{ ok: boolean; errors: string[]; tables: number; rows: number }> {
+  async healthCheck(): Promise<{
+    ok: boolean;
+    errors: string[];
+    tables: number;
+    rows: number;
+  }> {
     const errors: string[] = [];
     let rows = 0;
     const exported = await this.store.exportAll();
+    const exists = foreignReferenceChecker(exported);
     for (const table of this.schema.tables) {
       const tableRows = exported[table.name] ?? [];
       rows += tableRows.length;
@@ -2011,21 +2836,35 @@ export class PortableLawOffice {
         } catch (error) {
           errors.push(`${table.name}: ${(error as Error).message}`);
         }
-        const key = table.primaryKey.map((column) => String(row[column] ?? '')).join('\u0000');
+        const key = table.primaryKey
+          .map((column) => String(row[column] ?? ''))
+          .join('\u0000');
         if (seen.has(key)) errors.push(`${table.name}: duplicate key ${key}`);
         seen.add(key);
         for (const foreignKey of table.foreignKeys) {
-          const values = foreignKey.columns.map((column) => row[column] ?? null);
-          if (values.some((value) => value === null)) continue;
-          const parents = exported[foreignKey.referencedTable] ?? [];
-          const found = parents.some((parent) =>
-            foreignKey.referencedColumns.every((column, index) => (parent[column] ?? null) === values[index]),
+          const values = foreignKey.columns.map(
+            (column) => row[column] ?? null,
           );
-          if (!found) errors.push(`${table.name}: dangling ${foreignKey.columns.join(',')} -> ${foreignKey.referencedTable}`);
+          if (values.some((value) => value === null)) continue;
+          const found = exists(
+            foreignKey.referencedTable,
+            foreignKey.referencedColumns,
+            values,
+          );
+          if (!found)
+            errors.push(
+              `${table.name}: dangling ${foreignKey.columns.join(',')} -> ${foreignKey.referencedTable}`,
+            );
         }
       }
     }
-    return { ok: errors.length === 0, errors: errors.slice(0, 50), tables: this.schema.tables.length, rows };
+    errors.push(...(await caseGraphErrors(exported)));
+    return {
+      ok: errors.length === 0,
+      errors: errors.slice(0, 50),
+      tables: this.schema.tables.length,
+      rows,
+    };
   }
 
   // ---------------------------------------------------------------------
@@ -2035,13 +2874,14 @@ export class PortableLawOffice {
   async exportBackup(): Promise<PortableBackup> {
     const tables = await this.store.exportAll();
     const counts: Record<string, number> = {};
-    for (const [table, rows] of Object.entries(tables)) counts[table] = rows.length;
+    for (const [table, rows] of Object.entries(tables))
+      counts[table] = rows.length;
     const sha256 = await checksumTables(tables);
     return {
       format: 'lawo-portable-backup',
       formatVersion: 1,
       createdAt: this.now(),
-      schemaVersion: 1,
+      schemaVersion: SCHEMA.schemaVersion,
       applicationId: SCHEMA.applicationId,
       engine: this.store.engine,
       deviceId: this.deviceId,
@@ -2070,43 +2910,99 @@ export class PortableLawOffice {
         uniqueViolations: [],
       };
     }
-    if (candidate.schemaVersion !== SCHEMA.schemaVersion) errors.push(`schema version ${candidate.schemaVersion} is not supported`);
-    if (candidate.applicationId !== SCHEMA.applicationId) errors.push('application id mismatch');
+    if (![1, SCHEMA.schemaVersion].includes(candidate.schemaVersion ?? 0))
+      errors.push(`schema version ${candidate.schemaVersion} is not supported`);
+    if (candidate.formatVersion !== 1)
+      errors.push('unsupported backup format version');
+    if (candidate.engine !== 'sqlite' && candidate.engine !== 'indexeddb')
+      errors.push('unknown source engine');
+    const sourceSchema =
+      candidate.schemaVersion === 1 ? V1_SCHEMA : this.schema;
+    const sourceTables = new Map(sourceSchema.tables.map((t) => [t.name, t]));
+    if (candidate.applicationId !== SCHEMA.applicationId)
+      errors.push('application id mismatch');
     const tables = (candidate.tables ?? {}) as Record<string, EngineRow[]>;
-    for (const table of this.schema.tables) {
-      if (!tables[table.name]) errors.push(`missing table ${table.name}`);
+    for (const table of sourceSchema.tables) {
+      if (!Array.isArray(tables[table.name]))
+        errors.push(`missing table ${table.name}`);
     }
+    if (
+      Object.values(tables).some(
+        (rows) =>
+          !Array.isArray(rows) ||
+          rows.some(
+            (row) => !row || typeof row !== 'object' || Array.isArray(row),
+          ),
+      )
+    )
+      return {
+        valid: false,
+        errors: [...errors, 'malformed table rows'],
+        sha256: null,
+        schemaVersion: candidate.schemaVersion ?? null,
+        applicationId: candidate.applicationId ?? null,
+        deviceId: candidate.deviceId ?? null,
+        totalRows: 0,
+        foreignKeyViolations: [],
+        uniqueViolations: [],
+      };
     const recomputed = await checksumTables(tables);
-    if (recomputed !== candidate.sha256) errors.push('checksum does not match content');
+    if (recomputed !== candidate.sha256)
+      errors.push('checksum does not match content');
     let totalRows = 0;
+    const exists = foreignReferenceChecker(tables);
     for (const [tableName, rows] of Object.entries(tables)) {
-      const table = this.tables.get(tableName);
+      const table = sourceTables.get(tableName);
       if (!table) {
         errors.push(`unknown table ${tableName}`);
         continue;
       }
       totalRows += rows.length;
+      if (candidate.counts?.[tableName] !== rows.length)
+        errors.push(`row count mismatch: ${tableName}`);
       const seen = new Set<string>();
       for (const row of rows) {
-        const key = table.primaryKey.map((column) => String(row[column] ?? '')).join('\u0000');
-        if (seen.has(key)) uniqueViolations.push(`${tableName}: duplicate key ${key}`);
+        const key = table.primaryKey
+          .map((column) => String(row[column] ?? ''))
+          .join('\u0000');
+        if (seen.has(key))
+          uniqueViolations.push(`${tableName}: duplicate key ${key}`);
         seen.add(key);
         try {
-          this.assertLocalConstraints(tableName, row);
+          const validationRow = { ...row };
+          if (candidate.schemaVersion === 1)
+            for (const c of this.tables.get(tableName)!.columns)
+              if (!table.columns.some((old) => old.name === c.name))
+                validationRow[c.name] = c.defaultValue ?? null;
+          if (
+            Object.keys(row).some(
+              (key) => !table.columns.some((c) => c.name === key),
+            )
+          )
+            errors.push(`${tableName}: unknown columns`);
+          this.assertLocalConstraints(tableName, validationRow);
         } catch (error) {
           errors.push(`${tableName}: ${(error as Error).message}`);
         }
         for (const foreignKey of table.foreignKeys) {
-          const values = foreignKey.columns.map((column) => row[column] ?? null);
-          if (values.some((value) => value === null)) continue;
-          const parentRows = tables[foreignKey.referencedTable] ?? [];
-          const found = parentRows.some((parent) =>
-            foreignKey.referencedColumns.every((column, index) => (parent[column] ?? null) === values[index]),
+          const values = foreignKey.columns.map(
+            (column) => row[column] ?? null,
           );
-          if (!found) violations.push(`${tableName}.${foreignKey.columns.join(',')} -> ${foreignKey.referencedTable}`);
+          if (values.some((value) => value === null)) continue;
+          const found = exists(
+            foreignKey.referencedTable,
+            foreignKey.referencedColumns,
+            values,
+          );
+          if (!found)
+            violations.push(
+              `${tableName}.${foreignKey.columns.join(',')} -> ${foreignKey.referencedTable}`,
+            );
         }
       }
-      for (const index of table.indexes.filter((candidateIndex) => candidateIndex.unique)) {
+      for (const index of table.indexes.filter(
+        (candidateIndex) => candidateIndex.unique,
+      )) {
         const keys = new Set<string>();
         for (const row of rows) {
           if (index.where) {
@@ -2116,13 +3012,36 @@ export class PortableLawOffice {
           const values = index.columns.map((column) => row[column] ?? null);
           if (values.some((value) => value === null)) continue;
           const key = values.join('\u0000');
-          if (keys.has(key)) uniqueViolations.push(`${tableName}.${index.name}: ${key}`);
+          if (keys.has(key))
+            uniqueViolations.push(`${tableName}.${index.name}: ${key}`);
           keys.add(key);
         }
       }
     }
-    if (violations.length > 0) errors.push(`${violations.length} foreign key violations`);
-    if (uniqueViolations.length > 0) errors.push(`${uniqueViolations.length} unique index violations`);
+    if (candidate.engine === 'sqlite' || candidate.engine === 'indexeddb')
+      for (const definition of CASE_MIGRATION_METADATA[candidate.engine].filter(
+        (m) => m.version <= (candidate.schemaVersion ?? 0),
+      )) {
+        const record = tables.schema_migration?.find(
+          (row) => row.version === definition.version,
+        );
+        if (
+          !record ||
+          record.checksum !== definition.checksum ||
+          record.name !== definition.name
+        )
+          errors.push(`migration history mismatch: ${definition.version}`);
+      }
+    if (
+      candidate.schemaVersion === 2 &&
+      errors.length === 0 &&
+      violations.length === 0
+    )
+      errors.push(...(await caseGraphErrors(tables)));
+    if (violations.length > 0)
+      errors.push(`${violations.length} foreign key violations`);
+    if (uniqueViolations.length > 0)
+      errors.push(`${uniqueViolations.length} unique index violations`);
     return {
       valid: errors.length === 0,
       errors,
@@ -2136,13 +3055,28 @@ export class PortableLawOffice {
     };
   }
 
-  async restoreBackup(backup: unknown): Promise<{ restoredRows: number; verification: PortableBackupVerification }> {
+  async restoreBackup(backup: unknown): Promise<{
+    restoredRows: number;
+    verification: PortableBackupVerification;
+  }> {
     const verification = await this.verifyBackup(backup);
     if (!verification.valid) {
-      throw new AppError('BACKUP_CORRUPT', 'portable backup failed verification', { errors: verification.errors });
+      throw new AppError(
+        'BACKUP_CORRUPT',
+        'portable backup failed verification',
+        { errors: verification.errors },
+      );
     }
     const candidate = backup as PortableBackup;
-    await this.store.importAll(candidate.tables);
+    const upgraded = upgradeBackupTables(
+      candidate.tables,
+      candidate.schemaVersion,
+      candidate.engine as 'sqlite' | 'indexeddb',
+      this.store.engine,
+      this.now(),
+      this.appVersion,
+    );
+    await this.store.importAll(upgraded);
     const deviceId = await this.conn.get('app_meta', 'local.device_id');
     if (typeof deviceId?.value === 'string') {
       this.deviceId = deviceId.value;
@@ -2153,15 +3087,44 @@ export class PortableLawOffice {
       }
     }
     await this.store.transaction(['app_meta'], async (tx) => {
-      await tx.put('app_meta', toAppMeta('restore.last_at', this.now(), this.now()));
-      await tx.put('app_meta', toAppMeta('restore.source_device_id', candidate.deviceId, this.now()));
+      await tx.put(
+        'app_meta',
+        toAppMeta('restore.last_at', this.now(), this.now()),
+      );
+      await tx.put(
+        'app_meta',
+        toAppMeta('restore.source_device_id', candidate.deviceId, this.now()),
+      );
     });
+    try {
+      await this.rebuildSearch();
+    } catch (error) {
+      throw new AppError(
+        'SEARCH_UNAVAILABLE',
+        'Backup records were restored, but rebuilding the local index is pending. Reopen the app to retry.',
+        { restoredRows: verification.totalRows, rebuildPending: true },
+        error,
+      );
+    }
     return { restoredRows: verification.totalRows, verification };
   }
 
   async stats(): Promise<Record<string, number>> {
     const counts: Record<string, number> = {};
-    for (const table of ['party', 'client_profile', 'case_file', 'legal_case', 'hearing', 'judgment', 'task', 'document', 'financial_transaction', 'audit_log', 'sync_outbox', 'search_document']) {
+    for (const table of [
+      'party',
+      'client_profile',
+      'case_file',
+      'legal_case',
+      'hearing',
+      'judgment',
+      'task',
+      'document',
+      'financial_transaction',
+      'audit_log',
+      'sync_outbox',
+      'search_document',
+    ]) {
       counts[table] = await this.conn.count(table);
     }
     return counts;
@@ -2176,7 +3139,12 @@ function toEngineRow(values: Record<string, unknown>): EngineRow {
   const row: EngineRow = {};
   for (const [key, value] of Object.entries(values)) {
     if (value === undefined) row[key] = null;
-    else if (value === null || typeof value === 'string' || typeof value === 'number') row[key] = value;
+    else if (
+      value === null ||
+      typeof value === 'string' ||
+      typeof value === 'number'
+    )
+      row[key] = value;
     else if (typeof value === 'boolean') row[key] = value ? 1 : 0;
     else row[key] = String(value);
   }
@@ -2184,32 +3152,43 @@ function toEngineRow(values: Record<string, unknown>): EngineRow {
 }
 
 function assertUuid(value: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
+  if (
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      value,
+    )
+  ) {
     throw new ValidationError('id must be a UUID');
   }
 }
 
-function tryGetSyncEntityByTable(table: string): SyncEntityDefinition | undefined {
+function tryGetSyncEntityByTable(
+  table: string,
+): SyncEntityDefinition | undefined {
   return syncEntityByTable(table);
 }
 
-async function checksumTables(tables: Record<string, EngineRow[]>): Promise<string> {
+async function checksumTables(
+  tables: Record<string, EngineRow[]>,
+): Promise<string> {
   const canonical = stableStringify(
     Object.fromEntries(
       Object.keys(tables)
         .sort()
         .map((table) => [
           table,
-          [...(tables[table] ?? [])].sort((left, right) =>
-            stableStringify(left).localeCompare(stableStringify(right)),
-          ),
+          (tables[table] ?? [])
+            .map((row) => ({ row, key: stableStringify(row) }))
+            .sort((left, right) => left.key.localeCompare(right.key))
+            .map((item) => item.row),
         ]),
     ),
   );
   const bytes = new TextEncoder().encode(canonical);
   if (globalThis.crypto?.subtle) {
     const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-    return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    return [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
   }
   // Deterministic non-cryptographic fallback for runtimes without WebCrypto.
   let hash = 0x811c9dc5;
@@ -2219,8 +3198,6 @@ async function checksumTables(tables: Record<string, EngineRow[]>): Promise<stri
   }
   return `fnv1a-${hash.toString(16).padStart(8, '0')}`;
 }
-
-
 
 const SETTING_KEY_RE = /^[a-z][a-zA-Z0-9_.-]{0,100}$/;
 
@@ -2237,11 +3214,14 @@ function normalizeSettingValue(
   switch (type) {
     case 'number': {
       const parsed = typeof value === 'number' ? value : Number(value);
-      if (!Number.isFinite(parsed)) throw new ValidationError('device setting must be a number');
+      if (!Number.isFinite(parsed))
+        throw new ValidationError('device setting must be a number');
       return String(parsed);
     }
     case 'boolean':
-      return value === true || String(value).toLowerCase() === 'true' || String(value) === '1'
+      return value === true ||
+        String(value).toLowerCase() === 'true' ||
+        String(value) === '1'
         ? 'true'
         : 'false';
     case 'json': {

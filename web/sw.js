@@ -6,7 +6,7 @@
  * The worker never caches API responses because the app has no server API:
  * all legal data lives in IndexedDB, which service workers do not touch.
  */
-const VERSION = 'midad-v1';
+const VERSION = 'midad-cases-v2-20261019';
 const SHELL = `${VERSION}-shell`;
 const RUNTIME = `${VERSION}-runtime`;
 

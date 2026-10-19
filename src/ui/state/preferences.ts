@@ -58,7 +58,9 @@ export class Preferences {
   }
 
   get<K extends keyof PreferenceValues>(key: K): PreferenceValues[K] {
-    return (this.values.get(key) as PreferenceValues[K] | undefined) ?? DEFAULTS[key];
+    return (
+      (this.values.get(key) as PreferenceValues[K] | undefined) ?? DEFAULTS[key]
+    );
   }
 
   getString(key: string, fallback = ''): string {
@@ -80,22 +82,27 @@ export class Preferences {
     }
   }
 
-  async set(key: string, value: string | number | boolean, type: 'string' | 'number' | 'boolean' | 'json' = 'string'): Promise<void> {
-    await this.db.setDeviceSetting(key, value, type);
+  async set(
+    key: string,
+    value: string | number | boolean,
+    type: 'string' | 'number' | 'boolean' | 'json' = 'string',
+  ): Promise<void> {
+    await this.db.setDeviceSetting(key, value, type, { independent: true });
     this.values.set(key, String(value));
     this.apply();
     this.emit();
   }
 
   async remove(key: string): Promise<void> {
-    await this.db.removeDeviceSetting(key);
+    await this.db.removeDeviceSetting(key, { independent: true });
     this.values.delete(key);
     this.apply();
     this.emit();
   }
 
   async reset(keys: readonly string[]): Promise<void> {
-    for (const key of keys) await this.db.removeDeviceSetting(key);
+    for (const key of keys)
+      await this.db.removeDeviceSetting(key, { independent: true });
     for (const key of keys) this.values.delete(key);
     this.apply();
     this.emit();
@@ -129,7 +136,9 @@ export class Preferences {
   resolvedTheme(): 'light' | 'dark' {
     const preference = this.get('ui.theme');
     if (preference !== 'system') return preference;
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
   }
 
   apply(): void {
@@ -137,10 +146,18 @@ export class Preferences {
     root.dataset.theme = this.resolvedTheme();
     root.dataset.density = this.get('ui.density');
     root.dataset.motion = this.get('ui.reduceMotion');
-    root.style.setProperty('--user-font-scale', String(Math.min(125, Math.max(85, this.getNumber('ui.fontScale', 100))) / 100));
+    root.style.setProperty(
+      '--user-font-scale',
+      String(
+        Math.min(125, Math.max(85, this.getNumber('ui.fontScale', 100))) / 100,
+      ),
+    );
     const themeColor = document.querySelector('meta[name="theme-color"]');
     if (themeColor) {
-      themeColor.setAttribute('content', this.resolvedTheme() === 'dark' ? '#101816' : '#f5f2ea');
+      themeColor.setAttribute(
+        'content',
+        this.resolvedTheme() === 'dark' ? '#101816' : '#f5f2ea',
+      );
     }
     if (!this.media) {
       this.media = window.matchMedia('(prefers-color-scheme: dark)');

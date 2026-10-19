@@ -1,0 +1,807 @@
+{
+  "date": "2026-10-19",
+  "branch": "arena/da2efbff-law-office",
+  "baseCommit": "8e49d7cc49340fd9ae0e23df4e89c976b1116e99",
+  "appVersion": "0.3.0",
+  "mergePushDeployPerformed": false,
+  "schema": {
+    "schemaVersion": 2,
+    "tables": 59,
+    "indexes": 187,
+    "checks": 194,
+    "foreignKeys": 172,
+    "lookupLists": 58,
+    "lookupItems": 505,
+    "syncEntityDefinitions": 45,
+    "freshBusinessCounts": {
+      "parties": 0,
+      "files": 0,
+      "cases": 0
+    },
+    "indexeddbV1Checksum": "2adaccba",
+    "migrations": {
+      "sqlite": [
+        {
+          "version": 1,
+          "name": "initial_schema_v1",
+          "checksum": "fab6503709aed3a06392d48872804371c8f2f083accb421dcab034978be6f2c8",
+          "description": "إنشاء المخطط الأساسي: الأطراف، الملفات، القضايا، الجلسات، الأحكام، الأعمال، المستندات، العقود، المالية، التدقيق، قابلية المزامنة، والبحث المحلي."
+        },
+        {
+          "version": 2,
+          "name": "case_intake_and_procedural_history",
+          "checksum": "1d2d86db541d21a43c8debd812153be1418211d963ef86eebdb476b5c13f49ec",
+          "description": "تصنيف وقوالب ومراحل مستقلة وفهرسة القضايا دون تغيير بيانات v1"
+        }
+      ],
+      "indexeddb": [
+        {
+          "version": 1,
+          "name": "0001_initial",
+          "checksum": "2adaccba",
+          "description": "Initial portable schema (57 tables)"
+        },
+        {
+          "version": 2,
+          "name": "case_intake_and_procedural_history",
+          "checksum": "cases-v2-20261019-1",
+          "description": "Additive case intake, stages and search facets v2"
+        }
+      ]
+    }
+  },
+  "frozenV1ComparedToBase": {
+    "unchanged": true,
+    "paths": [
+      "src/schema/v1",
+      "src/db/migrations/0001_initial.ts",
+      "src/sync/entity-registry.ts",
+      "docs/schema.md"
+    ]
+  },
+  "verification": {
+    "typecheck": "pass",
+    "typecheckTests": "pass",
+    "dataTests": {
+      "passed": 80,
+      "total": 80,
+      "skipped": 0,
+      "durationMs": 29286.767384
+    },
+    "caseUi": {
+      "passed": 81,
+      "total": 81,
+      "widths": [
+        320,
+        360,
+        390,
+        430,
+        768,
+        1024,
+        1280,
+        1440
+      ]
+    },
+    "existingUi": {
+      "passed": 32,
+      "total": 32
+    },
+    "routeResponsiveSmoke": {
+      "passed": 61,
+      "total": 61
+    },
+    "webBuild": {
+      "files": 58,
+      "paths": 59,
+      "esbuildOutputs": 48
+    },
+    "realBrowser": {
+      "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.0 Safari/537.36",
+      "engine": "indexeddb",
+      "caseUpgrade": {
+        "versionChangeClosedOldConnection": true,
+        "baselineLedgerPreserved": true,
+        "newMigrationVersions": [
+          2
+        ],
+        "fileIdPreserved": true,
+        "caseIdPreserved": true,
+        "linkIdPreserved": true,
+        "oldNotesPreserved": true,
+        "newDefaults": true,
+        "exactCases": 1,
+        "progress": [
+          {
+            "entity": "case_file",
+            "processed": 1,
+            "total": 1
+          },
+          {
+            "entity": "legal_case",
+            "processed": 1,
+            "total": 1
+          }
+        ],
+        "health": true,
+        "migrations": true
+      },
+      "restart": {
+        "personPersisted": true,
+        "filePersisted": true,
+        "casePersisted": true,
+        "searchHitsAfterRestart": 1,
+        "relations": {
+          "fileParties": 1,
+          "caseHearings": 2,
+          "judgmentFiles": 1
+        },
+        "integrity": {
+          "ok": true,
+          "errors": [],
+          "tables": 59,
+          "indexes": 187
+        },
+        "migrations": {
+          "valid": true,
+          "version": 2
+        }
+      },
+      "offline": {
+        "externalFetchFailed": true,
+        "writeSucceeded": true,
+        "readAfterWrite": true
+      },
+      "backup": {
+        "valid": true,
+        "rows": 757,
+        "bytes": 376251
+      },
+      "counts": {
+        "party": 1,
+        "client_profile": 1,
+        "case_file": 1,
+        "legal_case": 1,
+        "hearing": 2,
+        "judgment": 1,
+        "task": 2,
+        "document": 1,
+        "financial_transaction": 1,
+        "audit_log": 29,
+        "sync_outbox": 29,
+        "search_document": 10
+      }
+    },
+    "recheckedAt": "2026-10-19T13:00:00.473829+00:00",
+    "browserSetupNote": "First fresh parallel UI launch failed before application scenarios: the shared Chromium extraction was copied before completion. Replaced the incomplete temporary binary with the complete same-version binary (matching SHA-256); all UI suites then passed sequentially. No application code or assertions were changed for this retry."
+  },
+  "caseUiAssertions": [
+    {
+      "name": "conditional child data starts hidden",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "conditional child data becomes visible",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "partial intake has a real office file and no invented judicial case",
+      "ok": true,
+      "detail": "FILE-128F1B-2026-0001"
+    },
+    {
+      "name": "private child values persist but are excluded from every general search document",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "optional independent family stage survives creation",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "relationship edit remains a draft until the parent intake is saved",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "saved relationship keeps its ID, correct side and independent representation",
+      "ok": true,
+      "detail": [
+        {
+          "id": "d8e84ec3-5864-419c-96b5-e8f61ac13a0c",
+          "client": 0
+        }
+      ]
+    },
+    {
+      "name": "switching type and back retains hidden family values",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "fundamental fields cannot be hidden by customization",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "Escape closes only the top nested dialog and preserves the unsaved form",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "hidden labor namespace is retained after saving family again",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "manual stage requires its actual description, with focusable field error",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "closing a stage creates no automatic judicial case",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "existing task dialog persists stage and initializes the file picker",
+      "ok": true,
+      "detail": "c8a5baf9-6a44-4d97-b479-6e6e9b8b2d56"
+    },
+    {
+      "name": "existing appointment dialog persists its stage/file context",
+      "ok": true,
+      "detail": "c8a5baf9-6a44-4d97-b479-6e6e9b8b2d56"
+    },
+    {
+      "name": "stage follow-up tables read saved work",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "explicit court registration rejects an empty real case number",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "stage-to-court action preserves office file and stage identifiers",
+      "ok": true,
+      "detail": [
+        {
+          "number": "123",
+          "year": 2026
+        }
+      ]
+    },
+    {
+      "name": "independent related degree retains both numbers and manual relationship",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "template configuration saves a new office-level version",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "case list width 320",
+      "ok": true,
+      "detail": {
+        "body": 320,
+        "view": 320,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 320",
+      "ok": true,
+      "detail": {
+        "body": 320,
+        "view": 320,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 320",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 320",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 320",
+      "ok": true,
+      "detail": {
+        "body": 603,
+        "view": 603,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 320",
+      "ok": true,
+      "detail": {
+        "body": 603,
+        "view": 603,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 320",
+      "ok": true,
+      "detail": {
+        "body": 320,
+        "view": 320,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 360",
+      "ok": true,
+      "detail": {
+        "body": 360,
+        "view": 360,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 360",
+      "ok": true,
+      "detail": {
+        "body": 360,
+        "view": 360,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 360",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 360",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 360",
+      "ok": true,
+      "detail": {
+        "body": 639,
+        "view": 639,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 360",
+      "ok": true,
+      "detail": {
+        "body": 639,
+        "view": 639,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 360",
+      "ok": true,
+      "detail": {
+        "body": 360,
+        "view": 360,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 390",
+      "ok": true,
+      "detail": {
+        "body": 390,
+        "view": 390,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 390",
+      "ok": true,
+      "detail": {
+        "body": 390,
+        "view": 390,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 390",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 390",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 390",
+      "ok": true,
+      "detail": {
+        "body": 639,
+        "view": 639,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 390",
+      "ok": true,
+      "detail": {
+        "body": 639,
+        "view": 639,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 390",
+      "ok": true,
+      "detail": {
+        "body": 390,
+        "view": 390,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 430",
+      "ok": true,
+      "detail": {
+        "body": 430,
+        "view": 430,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 430",
+      "ok": true,
+      "detail": {
+        "body": 430,
+        "view": 430,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 430",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 430",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 430",
+      "ok": true,
+      "detail": {
+        "body": 645,
+        "view": 645,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 430",
+      "ok": true,
+      "detail": {
+        "body": 645,
+        "view": 645,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 430",
+      "ok": true,
+      "detail": {
+        "body": 430,
+        "view": 430,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 768",
+      "ok": true,
+      "detail": {
+        "body": 758,
+        "view": 768,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 768",
+      "ok": true,
+      "detail": {
+        "body": 758,
+        "view": 768,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 768",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 768",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 768",
+      "ok": true,
+      "detail": {
+        "body": 758,
+        "view": 768,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 768",
+      "ok": true,
+      "detail": {
+        "body": 758,
+        "view": 768,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 768",
+      "ok": true,
+      "detail": {
+        "body": 758,
+        "view": 768,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 1024",
+      "ok": true,
+      "detail": {
+        "body": 1024,
+        "view": 1024,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 1024",
+      "ok": true,
+      "detail": {
+        "body": 1024,
+        "view": 1024,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 1024",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 1024",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 1024",
+      "ok": true,
+      "detail": {
+        "body": 1014,
+        "view": 1024,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 1024",
+      "ok": true,
+      "detail": {
+        "body": 1014,
+        "view": 1024,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 1024",
+      "ok": true,
+      "detail": {
+        "body": 1014,
+        "view": 1024,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 1280",
+      "ok": true,
+      "detail": {
+        "body": 1280,
+        "view": 1280,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 1280",
+      "ok": true,
+      "detail": {
+        "body": 1280,
+        "view": 1280,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 1280",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 1280",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 1280",
+      "ok": true,
+      "detail": {
+        "body": 1270,
+        "view": 1280,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 1280",
+      "ok": true,
+      "detail": {
+        "body": 1270,
+        "view": 1280,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 1280",
+      "ok": true,
+      "detail": {
+        "body": 1270,
+        "view": 1280,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "case list width 1440",
+      "ok": true,
+      "detail": {
+        "body": 1440,
+        "view": 1440,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "expanded intake width 1440",
+      "ok": true,
+      "detail": {
+        "body": 1440,
+        "view": 1440,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "label associations width 1440",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "keyboard Tab remains inside intake width 1440",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "procedural history width 1440",
+      "ok": true,
+      "detail": {
+        "body": 1430,
+        "view": 1440,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "stage dialog width 1440",
+      "ok": true,
+      "detail": {
+        "body": 1430,
+        "view": 1440,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "template editor width 1440",
+      "ok": true,
+      "detail": {
+        "body": 1430,
+        "view": 1440,
+        "dialog": 0,
+        "content": 0
+      }
+    },
+    {
+      "name": "layout customization is committed through existing device_setting",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "offline reload preserves both degrees, history and sensitive-value privacy",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "offline writes use the real database and update history",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no external assets or services used",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "name": "no browser exceptions",
+      "ok": true,
+      "detail": []
+    }
+  ],
+  "benchmarks": [
+    "../benchmarks/2026-10-19/case-benchmark-sqlite-10000.json",
+    "../benchmarks/2026-10-19/case-benchmark-sqlite-100000.json",
+    "../benchmarks/2026-10-19/case-benchmark-indexeddb-10000.json",
+    "../benchmarks/2026-10-19/case-benchmark-indexeddb-100000.json"
+  ],
+  "limitations": [
+    "Synthetic compact legacy-like fixtures, not real client data or 100k audited UI creates.",
+    "Benchmarks measure services, not DOM rendering; caches are not OS-cold.",
+    "100k full export/restore/rebuild not measured.",
+    "No multiuser authorization, automatic backup encryption, cloud sync, or legal correctness certification.",
+    "Real browser verification is Chromium only; viewport emulation is not real phone/assistive-technology validation."
+  ]
+}

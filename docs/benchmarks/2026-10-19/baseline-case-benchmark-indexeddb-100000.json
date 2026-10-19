@@ -1,0 +1,123 @@
+{
+  "engine": "indexeddb",
+  "cases": 100000,
+  "expectedListTotal": 100001,
+  "bulkFixtureMs": 155926,
+  "method": "Synthetic legacy-like profiles, bulk transaction seeding (not 100k audited UI creates), 20% party links, 25% stages and terms, no attachments. List operations use real CaseService + store, cold record cache per sample.",
+  "listFirst25": {
+    "samplesMs": [
+      820,
+      760.7,
+      571.5
+    ],
+    "medianMs": 760.7,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25
+    },
+    "total": 100001
+  },
+  "listPage100": {
+    "samplesMs": [
+      712.2,
+      782.2,
+      692.6
+    ],
+    "medianMs": 712.2,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25
+    },
+    "total": 100001
+  },
+  "arabicNormalizedText": {
+    "samplesMs": [
+      2765.6,
+      2591.2,
+      2653.6
+    ],
+    "medianMs": 2653.6,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 102,
+      "maxReturnedBatch": 25
+    },
+    "total": 1000
+  },
+  "typeFacet": {
+    "samplesMs": [
+      1728.8,
+      1858.1,
+      1683.1
+    ],
+    "medianMs": 1728.8,
+    "io": {
+      "serviceStoreQueries": 9,
+      "returnedRows": 82,
+      "maxReturnedBatch": 25
+    },
+    "total": 33333
+  },
+  "subjectRelationFacet": {
+    "samplesMs": [
+      156375.7
+    ],
+    "medianMs": 156375.7,
+    "io": {
+      "serviceStoreQueries": 109,
+      "returnedRows": 50082,
+      "maxReturnedBatch": 500
+    },
+    "total": 25000
+  },
+  "dashboardExactCounts": {
+    "samplesMs": [
+      8011.6
+    ],
+    "medianMs": 8011.6,
+    "io": {
+      "serviceStoreQueries": 4,
+      "returnedRows": 0,
+      "maxReturnedBatch": 0
+    },
+    "total": 100001
+  },
+  "singleIntakeEditWithIncrementalIndex": {
+    "samplesMs": [
+      23.9,
+      26.1,
+      25.7
+    ],
+    "medianMs": 25.7,
+    "io": {
+      "serviceStoreQueries": 0,
+      "returnedRows": 0,
+      "maxReturnedBatch": 0
+    }
+  },
+  "storage": {
+    "engine": "indexeddb",
+    "engineVersion": "2",
+    "journalMode": "idb-transactional",
+    "foreignKeys": true,
+    "pathKind": "browser"
+  },
+  "openMs": 249,
+  "userAgent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.8010.0 Safari/537.36",
+  "maintenance": "100k full backup/rebuild not measured in this run; 10k measured separately",
+  "browserStorage": {
+    "usageBytes": 180959385,
+    "quotaBytes": 10918377625
+  },
+  "environment": {
+    "date": "2026-10-19T05:14:04.468Z",
+    "node": "v22.22.3",
+    "os": "linux",
+    "cpus": 2,
+    "cpu": "Intel(R) Xeon(R) Processor @ 2.60GHz",
+    "totalMemoryBytes": 4131278848
+  },
+  "totalWallMs": 338922
+}

@@ -7,7 +7,7 @@
  * from the stored DDL text so the portable profile evaluates exactly the same
  * predicates as SQLite instead of a hand-maintained approximation.
  */
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { LawOfficeDatabase } from '../src/app/law-office-database.ts';
 import { LAW_OFFICE_APPLICATION_ID } from '../src/db/constants.ts';
 import type {
@@ -18,7 +18,10 @@ import type {
   PortableTable,
 } from '../src/schema/portable-types.ts';
 
-const { database: db } = LawOfficeDatabase.open({ path: ':memory:', appVersion: '0.1.0-gen' });
+const { database: db } = LawOfficeDatabase.open({
+  path: ':memory:',
+  appVersion: '0.1.0-gen',
+});
 
 function splitTopLevel(input: string): string[] {
   const parts: string[] = [];
@@ -57,7 +60,10 @@ function splitTopLevel(input: string): string[] {
   return parts;
 }
 
-function extractBalanced(input: string, start: number): { body: string; end: number } {
+function extractBalanced(
+  input: string,
+  start: number,
+): { body: string; end: number } {
   let depth = 0;
   let quote: string | null = null;
   for (let index = start; index < input.length; index += 1) {
@@ -76,7 +82,8 @@ function extractBalanced(input: string, start: number): { body: string; end: num
     if (char === '(') depth += 1;
     if (char === ')') {
       depth -= 1;
-      if (depth === 0) return { body: input.slice(start + 1, index), end: index };
+      if (depth === 0)
+        return { body: input.slice(start + 1, index), end: index };
     }
   }
   throw new Error(`unbalanced parentheses: ${input.slice(start, start + 80)}`);
@@ -89,7 +96,10 @@ function extractChecks(text: string, column: string | null): PortableCheck[] {
   while ((index = upper.indexOf('CHECK', index)) !== -1) {
     let cursor = index + 5;
     while (/\s/.test(text[cursor] ?? '')) cursor += 1;
-    if (text[cursor] !== '(') throw new Error(`CHECK without parenthesis near ${text.slice(index, index + 40)}`);
+    if (text[cursor] !== '(')
+      throw new Error(
+        `CHECK without parenthesis near ${text.slice(index, index + 40)}`,
+      );
     const { body, end } = extractBalanced(text, cursor);
     checks.push({ expression: body.trim(), column });
     index = end + 1;
@@ -97,8 +107,13 @@ function extractChecks(text: string, column: string | null): PortableCheck[] {
   return checks;
 }
 
-function parseDefault(text: string): { value: string | number | null | undefined; rest: string } {
-  const match = /\bDEFAULT\s+(\([^)]*\)|'(?:''|[^'])*'|[A-Za-z0-9_.+-]+)/i.exec(text);
+function parseDefault(text: string): {
+  value: string | number | null | undefined;
+  rest: string;
+} {
+  const match = /\bDEFAULT\s+(\([^)]*\)|'(?:''|[^'])*'|[A-Za-z0-9_.+-]+)/i.exec(
+    text,
+  );
   if (!match) return { value: undefined, rest: text };
   const raw = match[1]!;
   let value: string | number | null;
@@ -120,7 +135,10 @@ const rows = db.db.query<{ name: string; sql: string }>(
 
 for (const row of rows) {
   const sql = row.sql;
-  const bodyMatch = /^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["'`]?([A-Za-z0-9_]+)["'`]?\s*\(/i.exec(sql);
+  const bodyMatch =
+    /^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["'`]?([A-Za-z0-9_]+)["'`]?\s*\(/i.exec(
+      sql,
+    );
   if (!bodyMatch) throw new Error(`cannot parse CREATE TABLE for ${row.name}`);
   const open = sql.indexOf('(', bodyMatch.index + bodyMatch[0].length - 1) + 0;
   const openIndex = sql.indexOf('(', sql.toUpperCase().indexOf('CREATE TABLE'));
@@ -146,7 +164,11 @@ for (const row of rows) {
 
   for (const segment of segments) {
     const head = segment.trimStart();
-    if (/^(CONSTRAINT\b.*)?(CHECK|UNIQUE|PRIMARY\s+KEY|FOREIGN\s+KEY)\b/i.test(head)) {
+    if (
+      /^(CONSTRAINT\b.*)?(CHECK|UNIQUE|PRIMARY\s+KEY|FOREIGN\s+KEY)\b/i.test(
+        head,
+      )
+    ) {
       const withoutName = head.replace(/^CONSTRAINT\s+\S+\s+/i, '');
       if (/^CHECK\b/i.test(withoutName)) {
         checks.push(...extractChecks(withoutName, null));
@@ -154,14 +176,20 @@ for (const row of rows) {
         const paren = withoutName.indexOf('(');
         if (paren >= 0) {
           const { body: cols } = extractBalanced(withoutName, paren);
-          for (const column of splitTopLevel(cols)) inlineUnique.add(column.replace(/["'`]/g, '').trim());
+          for (const column of splitTopLevel(cols))
+            inlineUnique.add(column.replace(/["'`]/g, '').trim());
         }
       }
       tableConstraints.push(withoutName);
       continue;
     }
-    const columnMatch = /^["'`]?([A-Za-z0-9_]+)["'`]?\s+([A-Za-z]+)?/i.exec(head);
-    if (!columnMatch) throw new Error(`cannot parse column in ${row.name}: ${head.slice(0, 60)}`);
+    const columnMatch = /^["'`]?([A-Za-z0-9_]+)["'`]?\s+([A-Za-z]+)?/i.exec(
+      head,
+    );
+    if (!columnMatch)
+      throw new Error(
+        `cannot parse column in ${row.name}: ${head.slice(0, 60)}`,
+      );
     const columnName = columnMatch[1]!;
     const columnType = (columnMatch[2] ?? 'ANY').toUpperCase();
     columnTypes.set(columnName, columnType);
@@ -169,15 +197,22 @@ for (const row of rows) {
     const { rest: withoutDefault } = parseDefault(rest);
     checks.push(...extractChecks(withoutDefault, columnName));
     if (/\bUNIQUE\b/i.test(withoutDefault)) inlineUnique.add(columnName);
-    const reference = /\bREFERENCES\s+["'`]?([A-Za-z0-9_]+)["'`]?\s*\(\s*["'`]?([A-Za-z0-9_]+)["'`]?\s*\)/i.exec(
-      withoutDefault,
-    );
-    if (reference) inlineReferences.set(columnName, { table: reference[1]!, column: reference[2]! });
+    const reference =
+      /\bREFERENCES\s+["'`]?([A-Za-z0-9_]+)["'`]?\s*\(\s*["'`]?([A-Za-z0-9_]+)["'`]?\s*\)/i.exec(
+        withoutDefault,
+      );
+    if (reference)
+      inlineReferences.set(columnName, {
+        table: reference[1]!,
+        column: reference[2]!,
+      });
   }
 
   const columns: PortableColumn[] = pragma.map((column) => ({
     name: column.name,
-    type: (['TEXT', 'INTEGER', 'REAL', 'BLOB'].includes(columnTypes.get(column.name) ?? '')
+    type: (['TEXT', 'INTEGER', 'REAL', 'BLOB'].includes(
+      columnTypes.get(column.name) ?? '',
+    )
       ? columnTypes.get(column.name)
       : 'ANY') as PortableColumn['type'],
     notNull: column.notnull === 1,
@@ -209,22 +244,29 @@ for (const row of rows) {
     group.push(fk);
     fkGroups.set(fk.id, group);
   }
-  const foreignKeys: PortableForeignKey[] = [...fkGroups.values()].map((group) => {
-    const sorted = [...group].sort((a, b) => a.seq - b.seq);
-    return {
-      columns: sorted.map((item) => item.from),
-      referencedTable: sorted[0]!.table,
-      referencedColumns: sorted.map((item) => item.to),
-      onDelete: sorted[0]!.on_delete as PortableForeignKey['onDelete'],
-    };
-  });
-
-  const indexRows = db.db.query<{ name: string; unique: number; partial: number; origin: string }>(
-    `PRAGMA index_list("${row.name}")`,
+  const foreignKeys: PortableForeignKey[] = [...fkGroups.values()].map(
+    (group) => {
+      const sorted = [...group].sort((a, b) => a.seq - b.seq);
+      return {
+        columns: sorted.map((item) => item.from),
+        referencedTable: sorted[0]!.table,
+        referencedColumns: sorted.map((item) => item.to),
+        onDelete: sorted[0]!.on_delete as PortableForeignKey['onDelete'],
+      };
+    },
   );
+
+  const indexRows = db.db.query<{
+    name: string;
+    unique: number;
+    partial: number;
+    origin: string;
+  }>(`PRAGMA index_list("${row.name}")`);
   const indexes: PortableIndex[] = [];
   for (const index of indexRows) {
-    const info = db.db.query<{ name: string }>(`PRAGMA index_info("${index.name}")`);
+    const info = db.db.query<{ name: string }>(
+      `PRAGMA index_info("${index.name}")`,
+    );
     indexes.push({
       name: index.name,
       columns: info.map((item) => item.name),
@@ -234,16 +276,23 @@ for (const row of rows) {
   }
 
   const names = new Set(columns.map((column) => column.name));
-  const syncable = names.has('deleted_at') && names.has('revision') && names.has('sync_status');
+  const syncable =
+    names.has('deleted_at') &&
+    names.has('revision') &&
+    names.has('sync_status');
   tables.push({
     name: row.name,
     columns,
-    primaryKey: pragma.filter((column) => column.pk > 0).sort((a, b) => a.pk - b.pk).map((column) => column.name),
+    primaryKey: pragma
+      .filter((column) => column.pk > 0)
+      .sort((a, b) => a.pk - b.pk)
+      .map((column) => column.name),
     indexes,
     foreignKeys,
     checks,
     syncable,
-    appendOnly: names.has('seq') && /_history$|_snapshot$|^audit_log$/.test(row.name),
+    appendOnly:
+      names.has('seq') && /_history$|_snapshot$|^audit_log$/.test(row.name),
   });
 }
 
@@ -269,7 +318,11 @@ for (const table of tables) {
     if (master?.sql && /\bWHERE\b/i.test(master.sql)) {
       (table.indexes as PortableIndex[])[index] = {
         ...entry,
-        where: master.sql.split(/\bWHERE\b/i)[1]!.trim().replace(/;$/, '').trim(),
+        where: master.sql
+          .split(/\bWHERE\b/i)[1]!
+          .trim()
+          .replace(/;$/, '')
+          .trim(),
       };
     }
   }
@@ -277,7 +330,7 @@ for (const table of tables) {
 
 const output = `/**
  * GENERATED FILE — do not edit by hand.
- * Source: migrated schema v1 (SQLite ${db.db.get<{ v: string }>('SELECT sqlite_version() AS v')?.v}).
+ * Source: migrated schema v2 (SQLite ${db.db.get<{ v: string }>('SELECT sqlite_version() AS v')?.v}).
  * Regenerate: node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts
  *
  * This descriptor is the engine-neutral schema used by the IndexedDB profile
@@ -288,7 +341,7 @@ import type { PortableSchema } from '../portable-types.ts';
 
 export const PORTABLE_SCHEMA: PortableSchema = ${JSON.stringify(
   {
-    schemaVersion: 1,
+    schemaVersion: 2,
     applicationId: LAW_OFFICE_APPLICATION_ID,
     tables,
   },
@@ -296,7 +349,8 @@ export const PORTABLE_SCHEMA: PortableSchema = ${JSON.stringify(
   2,
 )};
 `;
-writeFileSync('src/schema/v1/portable-schema.ts', output);
+mkdirSync('src/schema/v2', { recursive: true });
+writeFileSync('src/schema/v2/portable-schema.ts', output);
 process.stdout.write(
   `portable schema: ${tables.length} tables, ${tables.reduce((sum, table) => sum + table.indexes.length, 0)} indexes, ` +
     `${tables.reduce((sum, table) => sum + table.checks.length, 0)} checks, ` +

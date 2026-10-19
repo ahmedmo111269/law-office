@@ -1,6 +1,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { SqliteDatabase } from '../src/db/sqlite/sqlite-adapter.ts';
+import { MigrationManager } from '../src/db/migrations/manager.ts';
+import { INITIAL_MIGRATION } from '../src/db/migrations/0001_initial.ts';
 import { LawOfficeDatabase } from '../src/app/law-office-database.ts';
 import type { CaseFileRecord } from '../src/repositories/case-file-repository.ts';
 import type { LegalCaseRecord } from '../src/repositories/case-repository.ts';
@@ -19,12 +22,22 @@ export interface TestHarness {
   cleanup(): void;
 }
 
-export function openHarness(label = 'test'): TestHarness {
+export function openHarness(label = 'test', legacy = false): TestHarness {
   counter += 1;
   const dir = mkdtempSync(join(tmpdir(), `lawo-${label}-${counter}-`));
   const path = join(dir, 'office.sqlite');
   const clock = new FixedClock('2026-10-18T09:00:00.000Z');
+  if (legacy) {
+    const sqlite = SqliteDatabase.open({ path });
+    new MigrationManager(sqlite, {
+      clock,
+      appVersion: '0.1.0-test',
+      migrations: [INITIAL_MIGRATION],
+    }).migrate();
+    sqlite.close();
+  }
   const { database } = LawOfficeDatabase.open({
+    ...(legacy ? { migrateOnOpen: false } : {}),
     path,
     clock,
     appVersion: '0.1.0-test',
@@ -55,13 +68,17 @@ export function makeClient(
       firstName: 'أحمد',
       middleName: 'محمد',
       lastName,
-      nationalId: nationalId ?? `2900101${String(clientSequence).padStart(7, '0')}`,
+      nationalId:
+        nationalId ?? `2900101${String(clientSequence).padStart(7, '0')}`,
     },
     { sourceCode: 'referral' },
   );
 }
 
-export function makeCourt(db: LawOfficeDatabase, name = 'محكمة القاهرة الجديدة'): string {
+export function makeCourt(
+  db: LawOfficeDatabase,
+  name = 'محكمة القاهرة الجديدة',
+): string {
   return db.courts.createCourt({ name, courtKindCode: 'primary' }).id;
 }
 
@@ -73,7 +90,9 @@ export function makeFile(
   return db.caseFiles.create({
     title,
     fileTypeCode: 'primary',
-    ...(clientPartyIds.length === 0 ? {} : { clientPartyIds: [...clientPartyIds] }),
+    ...(clientPartyIds.length === 0
+      ? {}
+      : { clientPartyIds: [...clientPartyIds] }),
   });
 }
 

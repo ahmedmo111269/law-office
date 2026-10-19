@@ -1,8 +1,12 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoDate } from '../util/dates.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 
 export interface DocumentRecord extends EntityRecord {
@@ -29,7 +33,12 @@ export interface DocumentVersionRecord extends EntityRecord {
   readonly mime_type: string | null;
   readonly byte_size: number | null;
   readonly checksum_sha256: string | null;
-  readonly storage_state: 'registered' | 'stored' | 'verified' | 'missing' | 'failed';
+  readonly storage_state:
+    | 'registered'
+    | 'stored'
+    | 'verified'
+    | 'missing'
+    | 'failed';
   readonly verified_at: string | null;
   readonly notes: string | null;
 }
@@ -61,8 +70,14 @@ export class DocumentRepository {
   constructor(deps: RepositoryDependencies, lookups: LookupRepository) {
     this.deps = deps;
     this.lookups = lookups;
-    this.documents = new BaseRepository<DocumentRecord>(deps, getSyncEntity('document'));
-    this.versions = new BaseRepository<DocumentVersionRecord>(deps, getSyncEntity('document_version'));
+    this.documents = new BaseRepository<DocumentRecord>(
+      deps,
+      getSyncEntity('document'),
+    );
+    this.versions = new BaseRepository<DocumentVersionRecord>(
+      deps,
+      getSyncEntity('document_version'),
+    );
     this.links = new BaseRepository(deps, getSyncEntity('document_link'));
   }
 
@@ -79,23 +94,38 @@ export class DocumentRepository {
     statusCode?: string;
     notes?: string;
   }): DocumentRecord {
-    if (!input.title?.trim()) throw new ValidationError('document title is required');
+    if (!input.title?.trim())
+      throw new ValidationError('document title is required');
     if (input.docDate) assertIsoDate(input.docDate, 'docDate');
     if (input.sourcePartyId) this.requireExisting('party', input.sourcePartyId);
-    if (input.contentState && !['not_digitized', 'referenced', 'pending'].includes(input.contentState)) {
-      throw new ValidationError('new documents may not claim stored content without a version');
+    if (
+      input.contentState &&
+      !['not_digitized', 'referenced', 'pending'].includes(input.contentState)
+    ) {
+      throw new ValidationError(
+        'new documents may not claim stored content without a version',
+      );
     }
     return this.documents.insert({
       title: input.title.trim(),
-      doc_type_id: this.lookups.resolveOptional('document_type', input.docTypeCode),
+      doc_type_id: this.lookups.resolveOptional(
+        'document_type',
+        input.docTypeCode,
+      ),
       doc_number: input.docNumber?.trim() || null,
       doc_date: input.docDate ?? null,
       source_party_id: input.sourcePartyId ?? null,
       content_state: input.contentState ?? 'not_digitized',
       physical_location: input.physicalLocation ?? null,
       external_ref: input.externalRef ?? null,
-      confidentiality_id: this.lookups.resolveOptional('confidentiality', input.confidentialityCode),
-      status_id: this.lookups.resolveOptional('document_status', input.statusCode ?? 'draft'),
+      confidentiality_id: this.lookups.resolveOptional(
+        'confidentiality',
+        input.confidentialityCode,
+      ),
+      status_id: this.lookups.resolveOptional(
+        'document_status',
+        input.statusCode ?? 'draft',
+      ),
       notes: input.notes ?? null,
       archived_at: null,
     });
@@ -115,12 +145,19 @@ export class DocumentRepository {
   ): DocumentVersionRecord {
     const document = this.documents.requireById(documentId);
     if (input.storageKind === 'local_file' && !input.fileName?.trim()) {
-      throw new ValidationError('fileName is required for a local file version');
+      throw new ValidationError(
+        'fileName is required for a local file version',
+      );
     }
     if (input.checksumSha256 && !SHA256_RE.test(input.checksumSha256)) {
-      throw new ValidationError('checksum must be a lowercase SHA-256 hex digest');
+      throw new ValidationError(
+        'checksum must be a lowercase SHA-256 hex digest',
+      );
     }
-    if (input.byteSize !== undefined && (!Number.isSafeInteger(input.byteSize) || input.byteSize < 0)) {
+    if (
+      input.byteSize !== undefined &&
+      (!Number.isSafeInteger(input.byteSize) || input.byteSize < 0)
+    ) {
       throw new ValidationError('byteSize must be a non-negative integer');
     }
     const nextVersion =
@@ -143,7 +180,10 @@ export class DocumentRepository {
         verified_at: null,
         notes: input.notes ?? null,
       });
-      if (document.content_state !== 'pending' && input.storageKind === 'local_file') {
+      if (
+        document.content_state !== 'pending' &&
+        input.storageKind === 'local_file'
+      ) {
         this.documents.update(documentId, { content_state: 'pending' });
       }
       return version;
@@ -162,16 +202,23 @@ export class DocumentRepository {
   ): DocumentVersionRecord {
     const version = this.versions.requireById(versionId);
     if (version.storage_kind !== 'local_file') {
-      throw new ValidationError('only local_file versions can be marked stored');
+      throw new ValidationError(
+        'only local_file versions can be marked stored',
+      );
     }
-    if (!input.storagePath?.trim()) throw new ValidationError('storagePath is required');
+    if (!input.storagePath?.trim())
+      throw new ValidationError('storagePath is required');
     if (input.checksumSha256 && !SHA256_RE.test(input.checksumSha256)) {
-      throw new ValidationError('checksum must be a lowercase SHA-256 hex digest');
+      throw new ValidationError(
+        'checksum must be a lowercase SHA-256 hex digest',
+      );
     }
     return this.deps.db.transaction(() => {
       const updated = this.versions.update(versionId, {
         storage_path: input.storagePath.trim(),
-        ...(input.checksumSha256 ? { checksum_sha256: input.checksumSha256 } : {}),
+        ...(input.checksumSha256
+          ? { checksum_sha256: input.checksumSha256 }
+          : {}),
         ...(input.byteSize !== undefined ? { byte_size: input.byteSize } : {}),
         ...(input.mimeType ? { mime_type: input.mimeType } : {}),
         storage_state: 'stored',
@@ -182,18 +229,29 @@ export class DocumentRepository {
   }
 
   /** Verification requires the checksum computed by the caller from the file. */
-  verifyVersion(versionId: string, actualSha256: string, verifiedAtIso: string): DocumentVersionRecord {
+  verifyVersion(
+    versionId: string,
+    actualSha256: string,
+    verifiedAtIso: string,
+  ): DocumentVersionRecord {
     if (!SHA256_RE.test(actualSha256)) {
-      throw new ValidationError('actual checksum must be a lowercase SHA-256 hex digest');
+      throw new ValidationError(
+        'actual checksum must be a lowercase SHA-256 hex digest',
+      );
     }
     const version = this.versions.requireById(versionId);
     if (!version.checksum_sha256) {
-      throw new ValidationError('version has no stored checksum to verify against');
+      throw new ValidationError(
+        'version has no stored checksum to verify against',
+      );
     }
     if (version.checksum_sha256 !== actualSha256) {
-      throw new ValidationError('checksum mismatch; the stored file is not the registered one', {
-        versionId,
-      });
+      throw new ValidationError(
+        'checksum mismatch; the stored file is not the registered one',
+        {
+          versionId,
+        },
+      );
     }
     return this.versions.update(versionId, {
       storage_state: 'verified',
@@ -201,7 +259,11 @@ export class DocumentRepository {
     });
   }
 
-  link(documentId: string, target: DocumentTarget, notes?: string): EntityRecord {
+  link(
+    documentId: string,
+    target: DocumentTarget,
+    notes?: string,
+  ): EntityRecord {
     this.documents.requireById(documentId);
     this.requireTarget(target);
     const values: Record<string, string | null> = {
@@ -217,9 +279,7 @@ export class DocumentRepository {
       notes: notes ?? null,
     };
     const column =
-      target.kind === 'poa'
-        ? 'power_of_attorney_id'
-        : `${target.kind}_id`;
+      target.kind === 'poa' ? 'power_of_attorney_id' : `${target.kind}_id`;
     values[column] = target.id;
     return this.links.insert(values);
   }
@@ -261,7 +321,10 @@ export class DocumentRepository {
     if (options.docTypeCode) {
       filters.push({
         column: 'doc_type_id',
-        value: this.lookups.requireItemByCode('document_type', options.docTypeCode).id,
+        value: this.lookups.requireItemByCode(
+          'document_type',
+          options.docTypeCode,
+        ).id,
       });
     }
     return this.documents.list({
@@ -276,8 +339,13 @@ export class DocumentRepository {
     return this.documents.archive(id);
   }
 
-  softDelete(id: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.documents.softDelete(id, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    id: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.documents.softDelete(id, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restore(id: string): { batchId: string | null; restoredCount: number } {
@@ -299,9 +367,10 @@ export class DocumentRepository {
   }
 
   private requireExisting(table: string, id: string): void {
-    const row = this.deps.db.get(`SELECT id FROM "${table}" WHERE id = ? AND deleted_at IS NULL`, [
-      id,
-    ]);
+    const row = this.deps.db.get(
+      `SELECT id FROM "${table}" WHERE id = ? AND deleted_at IS NULL`,
+      [id],
+    );
     if (!row) throw new NotFoundError(table, id);
   }
 }

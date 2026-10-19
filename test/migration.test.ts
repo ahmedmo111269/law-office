@@ -21,7 +21,9 @@ const upgrade: Migration = {
   descriptionAr: 'إضافة جدول ملاحظات اختباري',
   checksum: checksum('v2-add-test-note'),
   up: (adapter) => {
-    adapter.exec('CREATE TABLE test_note (id TEXT PRIMARY KEY, body TEXT NOT NULL)');
+    adapter.exec(
+      'CREATE TABLE test_note (id TEXT PRIMARY KEY, body TEXT NOT NULL)',
+    );
   },
 };
 
@@ -37,7 +39,7 @@ const failing: Migration = {
 };
 
 test('17. a versioned upgrade applies once and preserves existing data', () => {
-  const h = openHarness('upgrade');
+  const h = openHarness('upgrade', true);
   const backupPath = join(h.dir, 'pre-upgrade.sqlite');
   try {
     const client = makeClient(h.db);
@@ -67,9 +69,17 @@ test('17. a versioned upgrade applies once and preserves existing data', () => {
       assert.equal(backupCalled, true);
       assert.equal(manager.readUserVersion(), 2);
       assert.equal(manager.appliedRows().length, 2);
-      assert.equal(db.get<{ c: number }>('SELECT COUNT(*) AS c FROM party')?.c, 1);
-      assert.equal(db.get<{ c: number }>('SELECT COUNT(*) AS c FROM case_file')?.c, fileCount);
-      assert.ok(db.get("SELECT name FROM sqlite_master WHERE name = 'test_note'"));
+      assert.equal(
+        db.get<{ c: number }>('SELECT COUNT(*) AS c FROM party')?.c,
+        1,
+      );
+      assert.equal(
+        db.get<{ c: number }>('SELECT COUNT(*) AS c FROM case_file')?.c,
+        fileCount,
+      );
+      assert.ok(
+        db.get("SELECT name FROM sqlite_master WHERE name = 'test_note'"),
+      );
 
       const again = manager.migrate();
       assert.deepEqual(again.applied, []);
@@ -100,7 +110,7 @@ test('17. a versioned upgrade applies once and preserves existing data', () => {
 });
 
 test('18. a failing migration rolls back completely and records the failure', () => {
-  const h = openHarness('migration-failure');
+  const h = openHarness('migration-failure', true);
   try {
     const client = makeClient(h.db);
     h.db.close();
@@ -113,14 +123,22 @@ test('18. a failing migration rolls back completely and records the failure', ()
       });
       assert.throws(() => manager.migrate(), /failed and was rolled back/);
       assert.equal(manager.readUserVersion(), 1);
-      assert.equal(db.get("SELECT name FROM sqlite_master WHERE name = 'should_not_exist'"), undefined);
+      assert.equal(
+        db.get(
+          "SELECT name FROM sqlite_master WHERE name = 'should_not_exist'",
+        ),
+        undefined,
+      );
       const failures = db.query<{ version: number; message: string }>(
         'SELECT version, message FROM migration_failure',
       );
       assert.equal(failures.length, 1);
       assert.equal(failures[0]?.version, 2);
       assert.match(failures[0]?.message ?? '', /forced migration failure/);
-      assert.equal(db.get<{ c: number }>('SELECT COUNT(*) AS c FROM party')?.c, 1);
+      assert.equal(
+        db.get<{ c: number }>('SELECT COUNT(*) AS c FROM party')?.c,
+        1,
+      );
 
       const safe = new MigrationManager(db, {
         clock: new FixedClock('2026-10-18T14:30:00.000Z'),
@@ -133,9 +151,15 @@ test('18. a failing migration rolls back completely and records the failure', ()
     } finally {
       db.close();
     }
-    const reopened = LawOfficeDatabase.open({ path: h.path, appVersion: '0.1.0-test' });
+    const reopened = LawOfficeDatabase.open({
+      path: h.path,
+      appVersion: '0.1.0-test',
+    });
     try {
-      assert.equal(reopened.database.parties.getFull(client.party.id)?.party.display_name, 'أحمد محمد العلي');
+      assert.equal(
+        reopened.database.parties.getFull(client.party.id)?.party.display_name,
+        'أحمد محمد العلي',
+      );
     } finally {
       reopened.database.close();
     }

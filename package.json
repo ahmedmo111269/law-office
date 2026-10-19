@@ -1,6 +1,6 @@
 {
   "name": "law-office",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Law office management — offline-first local data foundation (SQLite + IndexedDB)",
@@ -28,11 +28,14 @@
     "db:bench": "node --disable-warning=ExperimentalWarning scripts/benchmark.ts",
     "db:gen-manifest": "node --disable-warning=ExperimentalWarning scripts/gen-manifest.ts",
     "db:gen-schema": "node --disable-warning=ExperimentalWarning scripts/gen-schema-doc.ts",
-    "db:gen-portable": "node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts && node --disable-warning=ExperimentalWarning scripts/gen-portable-seed.ts",
+    "db:gen-portable": "node --disable-warning=ExperimentalWarning scripts/gen-portable-schema.ts && node --disable-warning=ExperimentalWarning scripts/gen-case-metadata.ts",
     "build:web": "node --disable-warning=ExperimentalWarning scripts/build-web.ts",
     "serve:web": "node --disable-warning=ExperimentalWarning scripts/serve-web.ts",
     "test:ui": "node --disable-warning=ExperimentalWarning scripts/ui-e2e.ts",
-    "test:smoke": "node --disable-warning=ExperimentalWarning scripts/ui-smoke.ts"
+    "test:smoke": "node --disable-warning=ExperimentalWarning scripts/ui-smoke.ts",
+    "test:cases": "node --disable-warning=ExperimentalWarning --test test/case-system.test.ts test/case-upgrade.test.ts test/case-query-plan.test.ts",
+    "test:ui:cases": "node --disable-warning=ExperimentalWarning scripts/ui-cases-e2e.ts",
+    "db:bench:cases": "node --disable-warning=ExperimentalWarning scripts/case-benchmark.ts"
   },
   "devDependencies": {
     "@fontsource/amiri": "^5.3.0",

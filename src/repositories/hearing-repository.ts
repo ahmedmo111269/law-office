@@ -1,8 +1,12 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { assertIsoTimestamp, toCanonicalTimestamp } from '../util/dates.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 import type { SettingsRepository } from './settings-repository.ts';
 
@@ -63,14 +67,20 @@ export class HearingRepository {
     this.deps = deps;
     this.lookups = lookups;
     this.settings = settings;
-    this.hearings = new BaseRepository<HearingRecord>(deps, getSyncEntity('hearing'));
+    this.hearings = new BaseRepository<HearingRecord>(
+      deps,
+      getSyncEntity('hearing'),
+    );
   }
 
   schedule(input: ScheduleHearingInput): HearingRecord {
     const legalCase = this.requireCase(input.caseId);
-    const scheduledAt = toCanonicalTimestamp(assertIsoTimestamp(input.scheduledAt, 'scheduledAt'));
+    const scheduledAt = toCanonicalTimestamp(
+      assertIsoTimestamp(input.scheduledAt, 'scheduledAt'),
+    );
     const courtId = input.courtId ?? (legalCase.court_id as string | null);
-    const circuitId = input.circuitId ?? (legalCase.circuit_id as string | null);
+    const circuitId =
+      input.circuitId ?? (legalCase.circuit_id as string | null);
     this.validateCourtCircuit(courtId, circuitId);
 
     return this.hearings.insert({
@@ -99,17 +109,31 @@ export class HearingRepository {
     const hearing = this.hearings.requireById(hearingId);
     const update: Record<string, string | null> = {};
     if (input.statusCode !== undefined) {
-      update.status_id = this.lookups.requireItemByCode('hearing_status', input.statusCode).id;
+      update.status_id = this.lookups.requireItemByCode(
+        'hearing_status',
+        input.statusCode,
+      ).id;
     }
-    if (input.heldAt !== undefined) update.held_at = toCanonicalTimestamp(assertIsoTimestamp(input.heldAt, 'heldAt'));
-    if (input.outcomeSummary !== undefined) update.outcome_summary = input.outcomeSummary;
-    if (input.courtDecision !== undefined) update.court_decision = input.courtDecision;
-    if (input.postponementReason !== undefined) update.postponement_reason = input.postponementReason;
-    if (input.requiredActions !== undefined) update.required_actions = input.requiredActions;
+    if (input.heldAt !== undefined)
+      update.held_at = toCanonicalTimestamp(
+        assertIsoTimestamp(input.heldAt, 'heldAt'),
+      );
+    if (input.outcomeSummary !== undefined)
+      update.outcome_summary = input.outcomeSummary;
+    if (input.courtDecision !== undefined)
+      update.court_decision = input.courtDecision;
+    if (input.postponementReason !== undefined)
+      update.postponement_reason = input.postponementReason;
+    if (input.requiredActions !== undefined)
+      update.required_actions = input.requiredActions;
     if (input.notes !== undefined) update.notes = input.notes;
 
     const effectiveStatus = input.statusCode;
-    if (effectiveStatus === 'held' && !('held_at' in update) && hearing.held_at === null) {
+    if (
+      effectiveStatus === 'held' &&
+      !('held_at' in update) &&
+      hearing.held_at === null
+    ) {
       update.held_at = toCanonicalTimestamp(this.deps.clock.now());
     }
     return Object.keys(update).length === 0
@@ -121,15 +145,22 @@ export class HearingRepository {
    * Inserts the next hearing and links the previous one in one transaction.
    * The new session must belong to the same case and be later in time.
    */
-  scheduleNext(previousHearingId: string, input: Omit<ScheduleHearingInput, 'caseId'> & { caseId?: string }): HearingRecord {
+  scheduleNext(
+    previousHearingId: string,
+    input: Omit<ScheduleHearingInput, 'caseId'> & { caseId?: string },
+  ): HearingRecord {
     const previous = this.hearings.requireById(previousHearingId);
     const caseId = input.caseId ?? previous.case_id;
     if (caseId !== previous.case_id) {
       throw new ValidationError('next hearing must belong to the same case');
     }
-    const scheduledAt = toCanonicalTimestamp(assertIsoTimestamp(input.scheduledAt, 'scheduledAt'));
+    const scheduledAt = toCanonicalTimestamp(
+      assertIsoTimestamp(input.scheduledAt, 'scheduledAt'),
+    );
     if (scheduledAt <= previous.scheduled_at) {
-      throw new ValidationError('next hearing must be scheduled after the previous hearing');
+      throw new ValidationError(
+        'next hearing must be scheduled after the previous hearing',
+      );
     }
 
     return this.deps.db.transaction(() => {
@@ -153,27 +184,50 @@ export class HearingRepository {
 
   upcoming(fromIso: string, limit = 50): HearingRecord[] {
     return this.hearings.list({
-      filters: [{ column: 'scheduled_at', operator: '>=', value: toCanonicalTimestamp(assertIsoTimestamp(fromIso, 'from')) }],
+      filters: [
+        {
+          column: 'scheduled_at',
+          operator: '>=',
+          value: toCanonicalTimestamp(assertIsoTimestamp(fromIso, 'from')),
+        },
+      ],
       limit,
       orderBy: { column: 'scheduled_at', direction: 'asc' },
     });
   }
 
-  getFull(hearingId: string): { hearing: HearingRecord; caseRow: SqlRow; court: SqlRow | undefined } {
+  getFull(hearingId: string): {
+    hearing: HearingRecord;
+    caseRow: SqlRow;
+    court: SqlRow | undefined;
+  } {
     const hearing = this.hearings.requireById(hearingId);
-    const caseRow = this.deps.db.get<SqlRow>('SELECT * FROM legal_case WHERE id = ?', [hearing.case_id]);
+    const caseRow = this.deps.db.get<SqlRow>(
+      'SELECT * FROM legal_case WHERE id = ?',
+      [hearing.case_id],
+    );
     if (!caseRow) throw new NotFoundError('legal_case', hearing.case_id);
     const court = hearing.court_id
-      ? this.deps.db.get<SqlRow>('SELECT * FROM court WHERE id = ?', [hearing.court_id])
+      ? this.deps.db.get<SqlRow>('SELECT * FROM court WHERE id = ?', [
+          hearing.court_id,
+        ])
       : undefined;
     return { hearing, caseRow, court };
   }
 
-  softDelete(hearingId: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.hearings.softDelete(hearingId, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    hearingId: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.hearings.softDelete(hearingId, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
-  restore(hearingId: string): { batchId: string | null; restoredCount: number } {
+  restore(hearingId: string): {
+    batchId: string | null;
+    restoredCount: number;
+  } {
     return this.hearings.restore(hearingId);
   }
 
@@ -186,7 +240,10 @@ export class HearingRepository {
     return row;
   }
 
-  private validateCourtCircuit(courtId: string | null, circuitId: string | null): void {
+  private validateCourtCircuit(
+    courtId: string | null,
+    circuitId: string | null,
+  ): void {
     if (circuitId) {
       if (!courtId) throw new ValidationError('a circuit requires a court');
       const row = this.deps.db.get<{ court_id: string }>(
@@ -194,12 +251,14 @@ export class HearingRepository {
         [circuitId],
       );
       if (!row) throw new NotFoundError('court_circuit', circuitId);
-      if (row.court_id !== courtId) throw new ValidationError('circuit does not belong to court');
+      if (row.court_id !== courtId)
+        throw new ValidationError('circuit does not belong to court');
     }
     if (courtId) {
-      const row = this.deps.db.get('SELECT id FROM court WHERE id = ? AND deleted_at IS NULL', [
-        courtId,
-      ]);
+      const row = this.deps.db.get(
+        'SELECT id FROM court WHERE id = ? AND deleted_at IS NULL',
+        [courtId],
+      );
       if (!row) throw new NotFoundError('court', courtId);
     }
   }

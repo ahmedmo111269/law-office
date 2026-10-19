@@ -1,9 +1,13 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { ConflictError, NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import { todayInTimeZone, assertIsoDate } from '../util/dates.ts';
 import { assertMinorAmount } from '../util/money.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 import type { SettingsRepository } from './settings-repository.ts';
 import type { CaseFileRecord } from './case-file-repository.ts';
@@ -69,24 +73,36 @@ export class CaseRepository {
     this.deps = deps;
     this.lookups = lookups;
     this.settings = settings;
-    this.cases = new BaseRepository<LegalCaseRecord>(deps, getSyncEntity('legal_case'));
+    this.cases = new BaseRepository<LegalCaseRecord>(
+      deps,
+      getSyncEntity('legal_case'),
+    );
     this.fileCases = new BaseRepository(deps, getSyncEntity('case_file_case'));
     this.caseLinks = new BaseRepository(deps, getSyncEntity('legal_case_link'));
   }
 
   create(input: CreateCaseInput): LegalCaseRecord {
-    if (!input.caseNumber?.trim()) throw new ValidationError('case number is required');
-    if (!Number.isInteger(input.caseYear) || input.caseYear < 1900 || input.caseYear > 2200) {
+    if (!input.caseNumber?.trim())
+      throw new ValidationError('case number is required');
+    if (
+      !Number.isInteger(input.caseYear) ||
+      input.caseYear < 1900 ||
+      input.caseYear > 2200
+    ) {
       throw new ValidationError('case year must be between 1900 and 2200');
     }
-    if (input.registrationDate) assertIsoDate(input.registrationDate, 'registrationDate');
+    if (input.registrationDate)
+      assertIsoDate(input.registrationDate, 'registrationDate');
     if (input.claimAmountMinor !== undefined) {
       assertMinorAmount(input.claimAmountMinor, 'claimAmountMinor');
-      if (input.claimAmountMinor < 0) throw new ValidationError('claim amount cannot be negative');
+      if (input.claimAmountMinor < 0)
+        throw new ValidationError('claim amount cannot be negative');
     }
     this.validateCourtAndCircuit(input.courtId, input.circuitId);
     const currency = input.currencyCode ?? 'EGP';
-    if (!this.deps.db.get('SELECT code FROM currency WHERE code = ?', [currency])) {
+    if (
+      !this.deps.db.get('SELECT code FROM currency WHERE code = ?', [currency])
+    ) {
       throw new ValidationError(`unknown currency ${currency}`);
     }
 
@@ -111,7 +127,8 @@ export class CaseRepository {
           'case status',
         ).id,
         registration_date:
-          input.registrationDate ?? todayInTimeZone(this.defaultTimezone(), this.deps.clock),
+          input.registrationDate ??
+          todayInTimeZone(this.defaultTimezone(), this.deps.clock),
         subject: input.subject ?? null,
         claim_amount_minor: input.claimAmountMinor ?? null,
         currency_code: currency,
@@ -130,7 +147,11 @@ export class CaseRepository {
   linkFile(
     fileId: string,
     caseId: string,
-    options: { relationTypeCode?: string; isPrimary?: boolean; notes?: string } = {},
+    options: {
+      relationTypeCode?: string;
+      isPrimary?: boolean;
+      notes?: string;
+    } = {},
   ): EntityRecord {
     this.requireFile(fileId);
     this.cases.requireById(caseId);
@@ -142,10 +163,14 @@ export class CaseRepository {
       limit: 1,
     })[0];
     if (existing) {
-      throw new ConflictError('case is already linked to this file', 'ALREADY_EXISTS', {
-        fileId,
-        caseId,
-      });
+      throw new ConflictError(
+        'case is already linked to this file',
+        'ALREADY_EXISTS',
+        {
+          fileId,
+          caseId,
+        },
+      );
     }
     return this.fileCases.insert({
       file_id: fileId,
@@ -166,7 +191,8 @@ export class CaseRepository {
   ): EntityRecord {
     this.cases.requireById(sourceCaseId);
     this.cases.requireById(targetCaseId);
-    if (sourceCaseId === targetCaseId) throw new ValidationError('a case cannot link to itself');
+    if (sourceCaseId === targetCaseId)
+      throw new ValidationError('a case cannot link to itself');
     return this.caseLinks.insert({
       source_case_id: sourceCaseId,
       target_case_id: targetCaseId,
@@ -221,7 +247,11 @@ export class CaseRepository {
 
   updateStatus(caseId: string, statusCode: string): LegalCaseRecord {
     return this.cases.update(caseId, {
-      status_id: this.lookups.requireItemByCode('case_status', statusCode, 'case status').id,
+      status_id: this.lookups.requireItemByCode(
+        'case_status',
+        statusCode,
+        'case status',
+      ).id,
     });
   }
 
@@ -240,21 +270,29 @@ export class CaseRepository {
     const current = this.cases.requireById(caseId);
     const update: Record<string, string | number | null> = {};
     if (patch.caseNumber !== undefined) {
-      if (!patch.caseNumber.trim()) throw new ValidationError('case number is required');
+      if (!patch.caseNumber.trim())
+        throw new ValidationError('case number is required');
       update.case_number = patch.caseNumber.trim();
     }
     if (patch.caseYear !== undefined) {
-      if (!Number.isInteger(patch.caseYear)) throw new ValidationError('case year must be an integer');
+      if (!Number.isInteger(patch.caseYear))
+        throw new ValidationError('case year must be an integer');
       update.case_year = patch.caseYear;
     }
-    const nextCourt = patch.courtId !== undefined ? patch.courtId : current.court_id;
-    const nextCircuit = patch.circuitId !== undefined ? patch.circuitId : current.circuit_id;
-    this.validateCourtAndCircuit(nextCourt ?? undefined, nextCircuit ?? undefined);
+    const nextCourt =
+      patch.courtId !== undefined ? patch.courtId : current.court_id;
+    const nextCircuit =
+      patch.circuitId !== undefined ? patch.circuitId : current.circuit_id;
+    this.validateCourtAndCircuit(
+      nextCourt ?? undefined,
+      nextCircuit ?? undefined,
+    );
     if (patch.courtId !== undefined) update.court_id = patch.courtId;
     if (patch.circuitId !== undefined) update.circuit_id = patch.circuitId;
     if (patch.subject !== undefined) update.subject = patch.subject;
     if (patch.claimAmountMinor !== undefined) {
-      if (patch.claimAmountMinor !== null) assertMinorAmount(patch.claimAmountMinor);
+      if (patch.claimAmountMinor !== null)
+        assertMinorAmount(patch.claimAmountMinor);
       update.claim_amount_minor = patch.claimAmountMinor;
     }
     if (patch.notes !== undefined) update.notes = patch.notes;
@@ -264,16 +302,26 @@ export class CaseRepository {
   }
 
   listCases(
-    options: { statusCode?: string; courtId?: string; limit?: number; offset?: number } = {},
+    options: {
+      statusCode?: string;
+      courtId?: string;
+      limit?: number;
+      offset?: number;
+    } = {},
   ): LegalCaseRecord[] {
     const filters = [];
     if (options.statusCode) {
       filters.push({
         column: 'status_id',
-        value: this.lookups.requireItemByCode('case_status', options.statusCode, 'case status').id,
+        value: this.lookups.requireItemByCode(
+          'case_status',
+          options.statusCode,
+          'case status',
+        ).id,
       });
     }
-    if (options.courtId) filters.push({ column: 'court_id', value: options.courtId });
+    if (options.courtId)
+      filters.push({ column: 'court_id', value: options.courtId });
     return this.cases.list({
       filters,
       limit: options.limit ?? 50,
@@ -286,8 +334,13 @@ export class CaseRepository {
     return this.cases.archive(caseId);
   }
 
-  softDelete(caseId: string, reason?: string): { batchId: string; affectedCount: number } {
-    return this.cases.softDelete(caseId, { ...(reason === undefined ? {} : { reason }) });
+  softDelete(
+    caseId: string,
+    reason?: string,
+  ): { batchId: string; affectedCount: number } {
+    return this.cases.softDelete(caseId, {
+      ...(reason === undefined ? {} : { reason }),
+    });
   }
 
   restore(caseId: string): { batchId: string | null; restoredCount: number } {
@@ -303,21 +356,25 @@ export class CaseRepository {
       );
       if (!circuit) throw new NotFoundError('court_circuit', circuitId);
       if (circuit.court_id !== courtId) {
-        throw new ValidationError('circuit does not belong to the selected court');
+        throw new ValidationError(
+          'circuit does not belong to the selected court',
+        );
       }
     }
     if (courtId) {
-      const court = this.deps.db.get('SELECT id FROM court WHERE id = ? AND deleted_at IS NULL', [
-        courtId,
-      ]);
+      const court = this.deps.db.get(
+        'SELECT id FROM court WHERE id = ? AND deleted_at IS NULL',
+        [courtId],
+      );
       if (!court) throw new NotFoundError('court', courtId);
     }
   }
 
   private requireFile(fileId: string): void {
-    const row = this.deps.db.get('SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL', [
-      fileId,
-    ]);
+    const row = this.deps.db.get(
+      'SELECT id FROM case_file WHERE id = ? AND deleted_at IS NULL',
+      [fileId],
+    );
     if (!row) throw new NotFoundError('case_file', fileId);
   }
 

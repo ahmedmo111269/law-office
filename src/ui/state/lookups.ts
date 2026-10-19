@@ -9,6 +9,8 @@ export interface LookupItem {
   readonly nameEn: string | null;
   readonly sortOrder: number;
   readonly isActive: boolean;
+  readonly parentId: string | null;
+  readonly description: string | null;
 }
 
 export interface LookupList {
@@ -54,6 +56,8 @@ export class Lookups {
         nameEn: row.name_en === null ? null : String(row.name_en),
         sortOrder: Number(row.sort_order ?? 0),
         isActive: row.is_active === 1,
+        parentId: row.parent_id ? String(row.parent_id) : null,
+        description: row.description ? String(row.description) : null,
       };
       instance.itemsById.set(item.id, item);
       instance.itemsByCode.set(`${item.listId}\u0000${item.code}`, item);
@@ -61,9 +65,27 @@ export class Lookups {
       if (bucket) bucket.push(item);
     }
     for (const bucket of instance.itemsByList.values()) {
-      bucket.sort((left, right) => left.sortOrder - right.sortOrder || left.nameAr.localeCompare(right.nameAr, 'ar'));
+      bucket.sort(
+        (left, right) =>
+          left.sortOrder - right.sortOrder ||
+          left.nameAr.localeCompare(right.nameAr, 'ar'),
+      );
     }
     return instance;
+  }
+
+  async refresh(db: PortableLawOffice): Promise<void> {
+    const fresh = await Lookups.load(db);
+    for (const key of [
+      'lists',
+      'itemsByList',
+      'itemsById',
+      'itemsByCode',
+    ] as const) {
+      this[key].clear();
+      for (const [k, v] of fresh[key])
+        (this[key] as Map<string, unknown>).set(k, v);
+    }
   }
 
   list(code: string): LookupList | undefined {
@@ -73,12 +95,14 @@ export class Lookups {
   items(listCode: string): readonly LookupItem[] {
     const list = this.lists.get(listCode);
     if (!list) return [];
-    return (this.itemsByList.get(list.id) ?? []).filter((item) => item.isActive);
+    return (this.itemsByList.get(list.id) ?? []).filter(
+      (item) => item.isActive,
+    );
   }
 
   allItems(listCode: string): readonly LookupItem[] {
     const list = this.lists.get(listCode);
-    return list ? this.itemsByList.get(list.id) ?? [] : [];
+    return list ? (this.itemsByList.get(list.id) ?? []) : [];
   }
 
   item(listCode: string, code: string): LookupItem | undefined {
@@ -90,9 +114,17 @@ export class Lookups {
     return id ? this.itemsById.get(id) : undefined;
   }
 
-  name(listCode: string, idOrCode: string | null | undefined, fallback = '—'): string {
+  name(
+    listCode: string,
+    idOrCode: string | null | undefined,
+    fallback = '—',
+  ): string {
     if (!idOrCode) return fallback;
-    return this.item(listCode, idOrCode)?.nameAr ?? this.byId(idOrCode)?.nameAr ?? fallback;
+    return (
+      this.item(listCode, idOrCode)?.nameAr ??
+      this.byId(idOrCode)?.nameAr ??
+      fallback
+    );
   }
 
   id(listCode: string, code: string | null | undefined): string | null {
@@ -122,11 +154,18 @@ export class Lookups {
   }
 }
 
-async function loadAll(db: PortableLawOffice, entityCode: string): Promise<EngineRow[]> {
+async function loadAll(
+  db: PortableLawOffice,
+  entityCode: string,
+): Promise<EngineRow[]> {
   const rows: EngineRow[] = [];
   let offset = 0;
   for (;;) {
-    const page = await db.query(entityCode, { limit: 500, offset, includeDeleted: true });
+    const page = await db.query(entityCode, {
+      limit: 500,
+      offset,
+      includeDeleted: true,
+    });
     rows.push(...page.rows);
     if (rows.length >= page.total || page.rows.length === 0) break;
     offset += page.rows.length;

@@ -1,12 +1,22 @@
 # مِداد — Law Office Management
 
-Arabic-first (RTL) law-office management app for Egyptian practice, running entirely on the local device. The interface is built on the existing offline-first data foundation: **SQLite** for desktop/CLI and **IndexedDB** for the installable PWA. No server, no cloud, no AI, no paid services, no CDN — the published app is a static bundle at **https://ahmedmo111269.github.io/law-office/**.
+Arabic-first (RTL) law-office management app for Egyptian practice, running entirely on the local device. The interface is built on the existing offline-first data foundation: **SQLite** for desktop/CLI and **IndexedDB** for the installable PWA. No server, no cloud, no AI, no paid services, no CDN — the app can be deployed as a static bundle. **The case-system work on this branch has not been merged or deployed.** The earlier deployment URL is https://ahmedmo111269.github.io/law-office/.
 
-- Branch: `arena/7c319720-law-office` (baseline `main` at `409f359`)
-- Schema: **v1** · 57 application tables · 90 indexes · 16 triggers · 54 lookup lists / 374 reference items
-- Tests: **47/47 passing** (`node:test`) plus **32/32** UI→IndexedDB assertions and **61/61** route/responsive checks
-- Real-browser test: Chromium 153 restarts with a persistent profile and reads back IndexedDB data with the network disabled (`npm run test:browser`)
-- Engines: SQLite for desktop/native (unchanged); IndexedDB for the PWA; shared portable write semantics and documented differences
+- Branch: `arena/da2efbff-law-office` (baseline `main` at `8e49d7c`); app/package/CLI version **0.3.0**
+- Schema: **v2** · 59 application tables · 187 indexes · 194 checks · 172 foreign keys · 58 lookup lists / 505 reference items. Applied v1 definitions/checksums are frozen.
+- Verification: **80/80** data-layer tests, **81/81** case-UI checks, **32/32** existing UI assertions and **61/61** route/responsive checks; see the dated report for commands and limits.
+- Real Chromium: actual v1→v2 versionchange, unchanged old IDs/ledger, restart/persistence and offline reads/writes (`npm run test:browser`).
+- Real case benchmarks: 10k and 100k on SQLite and Chromium IndexedDB; no fake-IDB performance numbers. At 100k the first 25 rows measured 12.94 ms / 704.6 ms; broad subject filtering still took 682 ms / 3976.4 ms.
+- Engines: SQLite for desktop/CLI; IndexedDB for the PWA; the case workflow uses shared portable semantics. No cloud sync or multiuser permission system is implemented.
+
+## منظومة القضايا الجديدة
+
+- [التقرير التفصيلي: 20 بندًا](docs/case-system-report.md)
+- [دليل الاستخدام والترقية والتعافي](docs/case-system-guide.md)
+- [القياسات الفعلية والبيانات الخام وحدودها](docs/case-system-performance.md)
+- [قاموس بيانات v2 المولد](docs/schema-v2.md)؛ [قاموس v1 التاريخي](docs/schema.md) محفوظ دون إعادة كتابة.
+
+ملف نزاع قبل القيد، قوالب شرطية بإصدارات، تصنيف قابل للتوسيع، أطراف وصفات مستقلة لكل درجة، مراحل سابقة وقضائية اختيارية، سجل إجراءات، جهات ودوائر موحدة، قاموس موضوعات وأسماء بديلة ودمج يدوي، بحث وفلاتر بعدّ دقيق، وتخصيص عبر التفضيلات الحالية. لا تُنشأ دعوى أو مرحلة تالية تلقائيًا، ولا تُحسب مواعيد طعن أو تقادم.
 
 ## إذا ظهرت صفحة README بدل البرنامج
 
@@ -32,7 +42,9 @@ npm run typecheck
 npm run typecheck:tests
 npm test
 npm run test:ui        # 20 UI → IndexedDB scenarios in headless Chromium
-npm run test:smoke     # 22 routes + dialogs + 320…1440 layouts
+npm run test:smoke     # routes + dialogs + responsive layouts (requires dist/)
+npm run test:ui:cases  # case forms/procedures/privacy; 320/360/390/430/768/1024/1280/1440
+npm run test:browser   # real v1 upgrade + browser restart + offline storage
 
 npm run db:init   -- --db data/office.sqlite
 npm run db:check  -- --db data/office.sqlite
@@ -54,7 +66,7 @@ npm run db:backup -- --db data/office.sqlite --label initial
 
 ## What exists
 
-- Full v1 DDL and seed: parties/persons/organisations, files/cases/courts, hearings/judgments, tasks/announcements, documents/versions/links, contracts/POAs, operational finance, appointments/reminders, audit, deletion batches, sync metadata, Arabic search.
+- Frozen v1 DDL/seed plus an additive v2 migration: parties/persons/organisations, files/cases/courts, hearings/judgments, tasks/announcements, documents/versions/links, contracts/POAs, operational finance, appointments/reminders, audit, deletion batches, sync metadata, Arabic search.
 - Storage boundary (`DatabaseAdapter`) and SQLite adapter with WAL, foreign keys, nested savepoints, 5 s busy timeout and application-id protection.
 - Repositories for all core entities, with revision tracking, sync outbox, redacted audit log and search projection on every write.
 - Versioned, checksummed, once-only migrations with per-migration transactions and failure records.
@@ -71,7 +83,7 @@ npm run db:backup -- --db data/office.sqlite --label initial
 | [`docs/architecture.md`](docs/architecture.md) | Layer map, data flow, write invariants, file inventory |
 | [`docs/decisions.md`](docs/decisions.md) | Storage engine per platform and architecture decisions |
 | [`docs/er-diagram.md`](docs/er-diagram.md) | Mermaid ER diagram and relationship rules |
-| [`docs/schema.md`](docs/schema.md) | Generated data dictionary: every table, column, FK, index, constraint, seed lookup |
+| [`docs/schema-v2.md`](docs/schema-v2.md) | Current generated data dictionary; `docs/schema.md` remains the historical v1 dictionary |
 | [`docs/migrations.md`](docs/migrations.md) | Migration mechanism, adding v2, recovery |
 | [`docs/backup-restore.md`](docs/backup-restore.md) | Backup/restore interface, WAL safety, attachments, limits |
 | [`docs/sync-readiness.md`](docs/sync-readiness.md) | Outbox, conflict metadata, policies, what is missing |
@@ -98,11 +110,12 @@ npm run db:backup -- --db data/office.sqlite --label initial
 ```bash
 npm run typecheck          # src only
 npm run typecheck:tests    # src + test + benchmark
-npm test                   # 39 tests (SQLite + IndexedDB + parity)
+npm test                   # 80 tests (SQLite + IndexedDB + parity)
 npm run test:idb           # IndexedDB engine + cross-engine parity only
 npm run test:browser       # real Chromium restart + offline storage test
 npm run db:bench -- --scale=1
 npm run db:gen-manifest    # regenerate required-schema manifest
-npm run db:gen-schema      # regenerate docs/schema.md
-npm run db:gen-portable    # regenerate the portable schema + seed from the migrated SQLite schema
+npm run db:gen-schema      # regenerate docs/schema-v2.md (preserves historical v1 docs)
+npm run db:gen-portable    # regenerate the current v2 descriptor + restore metadata
+npm run db:bench:cases -- --engine=indexeddb --count=100000  # disposable synthetic data only
 ```

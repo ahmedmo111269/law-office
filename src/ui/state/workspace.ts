@@ -1,4 +1,10 @@
-import { openBrowserDatabase, indexedDbAvailable, type BrowserDatabase } from '../../browser/browser-database.ts';
+import { AppError } from '../../errors.ts';
+import { toUiError } from '../errors.ts';
+import {
+  openBrowserDatabase,
+  indexedDbAvailable,
+  type BrowserDatabase,
+} from '../../browser/browser-database.ts';
 import type { PortableLawOffice } from '../../portable/portable-database.ts';
 import type { EngineRow } from '../../portable/store.ts';
 import { configureFormatting } from '../format.ts';
@@ -6,7 +12,7 @@ import { Preferences } from './preferences.ts';
 import { Lookups } from './lookups.ts';
 
 export const APP_NAME = 'مِداد';
-export const APP_VERSION = '0.2.0';
+export const APP_VERSION = '0.3.0';
 
 export interface StorageStatus {
   readonly persisted: boolean | null;
@@ -43,7 +49,12 @@ export class Workspace {
   private readonly listeners = new Set<Listener>();
   private persistRequested = false;
 
-  private constructor(handle: BrowserDatabase, profile: EngineRow, settings: EngineRow[], storage: StorageStatus) {
+  private constructor(
+    handle: BrowserDatabase,
+    profile: EngineRow,
+    settings: EngineRow[],
+    storage: StorageStatus,
+  ) {
     this.handle = handle;
     this.db = handle.db;
     this.profile = profile;
@@ -52,26 +63,30 @@ export class Workspace {
     this.preferences = new Preferences(this.db);
   }
 
-  static async open(): Promise<Workspace> {
+  static async open(
+    onProgress?: (message: string) => void,
+  ): Promise<Workspace> {
     if (!indexedDbAvailable()) {
       throw new Error('INDEXEDDB_UNAVAILABLE');
     }
-    const handle = await Promise.race([
-      openBrowserDatabase({
-        name: 'law-office',
-        appVersion: APP_VERSION,
-        deviceLabel: deviceLabel(),
-        timezone: 'Africa/Cairo',
-        // The schema only accepts the platform vocabulary declared in
-        // local_device's CHECK constraint; browser builds are always 'web'.
-        platform: 'web',
-      }),
-      new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('OPEN_TIMEOUT')), 20_000);
-      }),
-    ]);
-    const profileRows = await handle.db.query('office_profile', { limit: 1, includeDeleted: false });
-    const settingsPage = await handle.db.query('office_setting', { limit: 100, orderBy: [{ column: 'key', direction: 'asc' }] });
+    // A real v1→v2 index rebuild can exceed 20 seconds on a large office.
+    // Report committed batches/blocked tabs rather than timing out healthy work.
+    const handle = await openBrowserDatabase({
+      name: 'law-office',
+      appVersion: APP_VERSION,
+      deviceLabel: deviceLabel(),
+      timezone: 'Africa/Cairo',
+      platform: 'web',
+      ...(onProgress ? { onProgress } : {}),
+    });
+    const profileRows = await handle.db.query('office_profile', {
+      limit: 1,
+      includeDeleted: false,
+    });
+    const settingsPage = await handle.db.query('office_setting', {
+      limit: 100,
+      orderBy: [{ column: 'key', direction: 'asc' }],
+    });
     const storage = await readStorage();
     const workspace = new Workspace(
       handle,
@@ -94,9 +109,15 @@ export class Workspace {
     if (error instanceof Error && error.message === 'INDEXEDDB_UNAVAILABLE') {
       return 'هذا المتصفح لا يوفر IndexedDB. جرّب متصفحًا حديثًا، أو اخرج من وضع التصفح الخاص.';
     }
-    if (error instanceof Error && error.message === 'OPEN_TIMEOUT') {
-      return 'استغرق فتح قاعدة البيانات وقتًا أطول من المتوقع. أغلق النسخ الأخرى من البرنامج ثم أعد المحاولة.';
-    }
+    if (
+      error instanceof AppError &&
+      [
+        'MIGRATION_CHECKSUM_MISMATCH',
+        'MIGRATION_FAILED',
+        'SCHEMA_TOO_NEW',
+      ].includes(error.code)
+    )
+      return toUiError(error).message;
     return 'تعذر فتح قاعدة البيانات المحلية. تأكد من السماح للموقع بالتخزين ثم أعد المحاولة.';
   }
 
@@ -112,14 +133,18 @@ export class Workspace {
   }
 
   officeSettings(): OfficeSettings {
-    const map = new Map(this.settings.map((row) => [String(row.key), String(row.value)]));
+    const map = new Map(
+      this.settings.map((row) => [String(row.key), String(row.value)]),
+    );
     return {
       timezone: map.get('locale.timezone') ?? 'Africa/Cairo',
       dateFormat: map.get('locale.date_format') ?? 'dd/MM/yyyy',
       language: map.get('locale.language') ?? 'ar',
       backupReminderDays: Number(map.get('backup.reminder_days') ?? 7),
       defaultCurrency: map.get('finance.default_currency') ?? 'EGP',
-      defaultAppointmentMinutes: Number(map.get('appointments.default_duration_minutes') ?? 30),
+      defaultAppointmentMinutes: Number(
+        map.get('appointments.default_duration_minutes') ?? 30,
+      ),
     };
   }
 
@@ -135,7 +160,10 @@ export class Workspace {
   async reloadProfile(): Promise<void> {
     const rows = await this.db.query('office_profile', { limit: 1 });
     if (rows.rows[0]) this.profile = rows.rows[0];
-    const settingsPage = await this.db.query('office_setting', { limit: 100, orderBy: [{ column: 'key', direction: 'asc' }] });
+    const settingsPage = await this.db.query('office_setting', {
+      limit: 100,
+      orderBy: [{ column: 'key', direction: 'asc' }],
+    });
     this.settings = settingsPage.rows;
     this.applyFormatting();
     this.emit();
@@ -153,7 +181,12 @@ export class Workspace {
     if (row) {
       await this.db.update('office_setting', String(row.id), { value });
     } else {
-      await this.db.insert('office_setting', { key, value, value_type: 'string', description: null });
+      await this.db.insert('office_setting', {
+        key,
+        value,
+        value_type: 'string',
+        description: null,
+      });
     }
     await this.reloadProfile();
   }
@@ -194,8 +227,14 @@ export class Workspace {
 function deviceLabel(): string {
   const agent = navigator.userAgent;
   if (agent.includes('Edg/')) return 'Edge على سطح المكتب';
-  if (agent.includes('Chrome/')) return agent.includes('Mobile') ? 'Chrome على الهاتف' : 'Chrome على سطح المكتب';
-  if (agent.includes('Safari/') && !agent.includes('Chrome')) return agent.includes('Mobile') ? 'Safari على الهاتف' : 'Safari على سطح المكتب';
+  if (agent.includes('Chrome/'))
+    return agent.includes('Mobile')
+      ? 'Chrome على الهاتف'
+      : 'Chrome على سطح المكتب';
+  if (agent.includes('Safari/') && !agent.includes('Chrome'))
+    return agent.includes('Mobile')
+      ? 'Safari على الهاتف'
+      : 'Safari على سطح المكتب';
   if (agent.includes('Firefox/')) return 'Firefox';
   return 'متصفح';
 }
@@ -206,7 +245,9 @@ async function readStorage(): Promise<StorageStatus> {
   }
   try {
     const estimate = await navigator.storage.estimate();
-    const persisted = navigator.storage.persisted ? await navigator.storage.persisted() : null;
+    const persisted = navigator.storage.persisted
+      ? await navigator.storage.persisted()
+      : null;
     return {
       persisted,
       usage: typeof estimate.usage === 'number' ? estimate.usage : null,

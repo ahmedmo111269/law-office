@@ -25,11 +25,15 @@ export interface OpenBrowserDatabaseOptions {
   deviceLabel?: string;
   timezone?: string;
   platform?: string;
+  onProgress?: (message: string) => void;
 }
 
 export function indexedDbAvailable(): boolean {
   try {
-    return typeof globalThis.indexedDB !== 'undefined' && globalThis.indexedDB !== null;
+    return (
+      typeof globalThis.indexedDB !== 'undefined' &&
+      globalThis.indexedDB !== null
+    );
   } catch {
     return false;
   }
@@ -39,28 +43,49 @@ export async function openBrowserDatabase(
   options: OpenBrowserDatabaseOptions = {},
 ): Promise<BrowserDatabase> {
   if (!indexedDbAvailable()) {
-    throw new AppError('UNSUPPORTED_ENGINE', 'this browser does not provide IndexedDB');
+    throw new AppError(
+      'UNSUPPORTED_ENGINE',
+      'this browser does not provide IndexedDB',
+    );
   }
-  const indexedDb = await IndexedDbDatabase.open({ ...(options.name ? { name: options.name } : {}) });
-  const migrations = new IdbMigrationManager(indexedDb, {
-    appVersion: options.appVersion ?? '0.1.0',
+  const indexedDb = await IndexedDbDatabase.open({
+    ...(options.name ? { name: options.name } : {}),
+    onBlocked: () =>
+      options.onProgress?.(
+        'تنتظر ترقية قاعدة البيانات إغلاق نسخة أخرى من البرنامج. أغلق علامات التبويب الأخرى ثم انتظر؛ لا تحذف البيانات.',
+      ),
   });
-  await migrations.migrate();
-  const store = new IndexedDbStore(indexedDb);
-  const db = await PortableLawOffice.open({
-    store,
-    appVersion: options.appVersion ?? '0.1.0',
-    platform: options.platform ?? 'web',
-    deviceLabel: options.deviceLabel ?? 'متصفح',
-    timezone: options.timezone ?? 'Africa/Cairo',
-  });
-  return {
-    engine: 'indexeddb',
-    db,
-    indexedDb,
-    migrations,
-    close: async () => {
-      await store.close();
-    },
-  };
+  try {
+    options.onProgress?.(
+      'جارٍ التحقق من ترحيل البيانات المحلية مع الحفاظ على السجلات…',
+    );
+    const migrations = new IdbMigrationManager(indexedDb, {
+      appVersion: options.appVersion ?? '0.3.0',
+    });
+    await migrations.migrate();
+    const store = new IndexedDbStore(indexedDb);
+    const db = await PortableLawOffice.open({
+      store,
+      appVersion: options.appVersion ?? '0.3.0',
+      platform: options.platform ?? 'web',
+      deviceLabel: options.deviceLabel ?? 'متصفح',
+      timezone: options.timezone ?? 'Africa/Cairo',
+      onIndexProgress: ({ entity, processed, total }) =>
+        options.onProgress?.(
+          `جارٍ تحديث الفهرس المحلي: ${({ case_file: 'ملفات النزاع', legal_case: 'الدعاوى', party: 'الأطراف', court: 'الجهات', hearing: 'الجلسات', judgment: 'الأحكام', task: 'المهام', document: 'المستندات', contract: 'العقود', power_of_attorney: 'التوكيلات', appointment: 'المواعيد' } as Record<string, string>)[entity] ?? entity} ${processed} / ${total}. احتفظ بهذه النافذة مفتوحة؛ لا تُرسل البيانات لأي خادم.`,
+        ),
+    });
+    return {
+      engine: 'indexeddb',
+      db,
+      indexedDb,
+      migrations,
+      close: async () => {
+        await store.close();
+      },
+    };
+  } catch (error) {
+    indexedDb.close();
+    throw error;
+  }
 }

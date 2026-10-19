@@ -1,6 +1,11 @@
+import { AppError } from '../../errors.ts';
 import { h, type Child } from '../dom.ts';
 import { icon } from '../icons.ts';
-import { openDialog, type DialogSize } from '../components/dialog.ts';
+import {
+  openDialog,
+  type DialogSize,
+  type DialogHandle,
+} from '../components/dialog.ts';
 import { toastError, toastSuccess } from '../components/toast.ts';
 import { toUiError } from '../errors.ts';
 import { formatNumber } from '../format.ts';
@@ -8,7 +13,14 @@ import type { Lookups } from '../state/lookups.ts';
 import type { AppContext } from '../app/context.ts';
 import { notifyDataChanged } from '../events.ts';
 
-export type BadgeTone = 'success' | 'danger' | 'warning' | 'info' | 'primary' | 'quiet' | 'accent';
+export type BadgeTone =
+  | 'success'
+  | 'danger'
+  | 'warning'
+  | 'info'
+  | 'primary'
+  | 'quiet'
+  | 'accent';
 
 const STATUS_TONES: Record<string, BadgeTone> = {
   active: 'success',
@@ -57,26 +69,45 @@ export function statusTone(code: string | null | undefined): BadgeTone {
   return STATUS_TONES[code] ?? 'quiet';
 }
 
-export function codeBadge(code: string | null | undefined, label: string): HTMLElement {
+export function codeBadge(
+  code: string | null | undefined,
+  label: string,
+): HTMLElement {
   return h('span', { class: `badge badge--${statusTone(code)}`, text: label });
 }
 
-export function lookupBadge(lookups: Lookups, listCode: string, id: string | null | undefined): HTMLElement {
+export function lookupBadge(
+  lookups: Lookups,
+  listCode: string,
+  id: string | null | undefined,
+): HTMLElement {
   const byId = lookups.byId(String(id ?? ''));
-  const item = byId ? lookups.item(listCode, byId.code) ?? byId : undefined;
+  const item = byId ? (lookups.item(listCode, byId.code) ?? byId) : undefined;
   if (!item) return h('span', { class: 'text-3', text: '—' });
   return codeBadge(item.code, item.nameAr);
 }
 
-export function lookupName(lookups: Lookups, id: string | null | undefined): string {
+export function lookupName(
+  lookups: Lookups,
+  id: string | null | undefined,
+): string {
   return lookups.byId(String(id ?? ''))?.nameAr ?? '—';
 }
 
-export function lookupOptions(lookups: Lookups, listCode: string): Array<{ value: string; label: string }> {
-  return lookups.items(listCode).map((item) => ({ value: item.code, label: item.nameAr }));
+export function lookupOptions(
+  lookups: Lookups,
+  listCode: string,
+): Array<{ value: string; label: string }> {
+  return lookups
+    .items(listCode)
+    .map((item) => ({ value: item.code, label: item.nameAr }));
 }
 
-export function lookupId(lookups: Lookups, listCode: string, code: string): string {
+export function lookupId(
+  lookups: Lookups,
+  listCode: string,
+  code: string,
+): string {
   const id = lookups.id(listCode, code);
   if (!id) throw new Error(`قيمة مرجعية غير معروفة: ${listCode}/${code}`);
   return id;
@@ -100,10 +131,19 @@ export interface FormDialogOptions {
  * Wraps a form in a dialog with honest save semantics: the success toast fires
  * only after `onSubmit` resolved, which the pages implement as real DB writes.
  */
-export function openFormDialog(options: FormDialogOptions): void {
-  const form = h('form', { class: 'stack', style: 'gap:0', attrs: { novalidate: 'true' } });
+export function openFormDialog(options: FormDialogOptions): DialogHandle {
+  const form = h('form', {
+    class: 'stack',
+    style: 'gap:0',
+    attrs: { novalidate: 'true' },
+  });
+  form.id = `form-${crypto.randomUUID()}`;
   form.appendChild(options.content);
-  const errorBox = h('p', { class: 'field__error', attrs: { role: 'alert' }, style: 'margin-block-start:8px' });
+  const errorBox = h('p', {
+    class: 'field__error',
+    attrs: { role: 'alert' },
+    style: 'margin-block-start:8px',
+  });
   form.appendChild(errorBox);
   form.appendChild(h('div', { class: 'form-actions' }));
 
@@ -113,6 +153,7 @@ export function openFormDialog(options: FormDialogOptions): void {
     icon('save', 17),
     h('span', { text: options.submitLabel }),
   );
+  submit.setAttribute('form', form.id);
   const cancel = h('button', {
     class: 'btn btn--ghost',
     type: 'button',
@@ -126,13 +167,25 @@ export function openFormDialog(options: FormDialogOptions): void {
     ...(options.iconName ? { iconName: options.iconName } : {}),
     size: options.size ?? 'md',
     content: form,
-    footer: h('div', { class: 'dialog__actions' }, ...(options.extraFooter ?? []), cancel, submit),
+    footer: h(
+      'div',
+      { class: 'dialog__actions' },
+      ...(options.extraFooter ?? []),
+      cancel,
+      submit,
+    ),
   });
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (submit.disabled) return;
     errorBox.textContent = '';
+    for (const field of form.querySelectorAll('.field--invalid')) {
+      field.classList.remove('field--invalid');
+      field.querySelector('[aria-invalid]')?.removeAttribute('aria-invalid');
+      const hint = field.querySelector('.field__error');
+      if (hint) hint.textContent = '';
+    }
     submit.disabled = true;
     submit.classList.add('is-loading');
     try {
@@ -144,15 +197,37 @@ export function openFormDialog(options: FormDialogOptions): void {
     } catch (error) {
       const ui = toUiError(error);
       errorBox.textContent = ui.message;
+      if (error instanceof AppError && typeof error.details?.field === 'string')
+        setFieldError(form, error.details.field, ui.message);
       submit.classList.remove('is-loading');
       submit.disabled = false;
-      const firstInvalid = form.querySelector<HTMLElement>('[aria-invalid="true"], .field--invalid .input');
-      firstInvalid?.focus();
+      const firstInvalid = form.querySelector<HTMLElement>(
+        '[aria-invalid="true"], .field--invalid .input',
+      );
+      if (firstInvalid) {
+        const wrapper = firstInvalid.closest<HTMLElement>('.field');
+        if (wrapper) wrapper.hidden = false;
+        let parent = firstInvalid.parentElement;
+        while (parent) {
+          if (parent instanceof HTMLDetailsElement) {
+            parent.hidden = false;
+            parent.open = true;
+          }
+          parent = parent.parentElement;
+        }
+        firstInvalid.scrollIntoView({ block: 'center' });
+        firstInvalid.focus();
+      }
     }
   });
+  return handle;
 }
 
-export async function runAction(label: string, action: () => Promise<void>, onDone?: () => void): Promise<void> {
+export async function runAction(
+  label: string,
+  action: () => Promise<void>,
+  onDone?: () => void,
+): Promise<void> {
   try {
     await action();
     toastSuccess(label);
@@ -177,7 +252,12 @@ export function iconButton(options: {
       type: 'button',
       title: options.label,
       attrs: { 'aria-label': options.label },
-      on: { click: (event) => { event.stopPropagation(); options.onClick(); } },
+      on: {
+        click: (event) => {
+          event.stopPropagation();
+          options.onClick();
+        },
+      },
       style: options.danger ? 'color:var(--c-danger)' : '',
     },
     icon(options.iconName, 16),
@@ -192,7 +272,11 @@ export function formValues(form: HTMLFormElement): Record<string, string> {
   return values;
 }
 
-export function setFieldError(form: HTMLFormElement, name: string, message: string): void {
+export function setFieldError(
+  form: HTMLFormElement,
+  name: string,
+  message: string,
+): void {
   const control = form.querySelector<HTMLElement>(`[name="${name}"]`);
   const field = control?.closest<HTMLElement>('.field');
   if (!field) return;
@@ -204,15 +288,25 @@ export function setFieldError(form: HTMLFormElement, name: string, message: stri
 
 export function clearFocusedRow(path: string): void {
   if (!window.location.hash.includes('focus=')) return;
-  window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}#${path}`);
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${window.location.search}#${path}`,
+  );
 }
 
 export function money(valueMinor: number): string {
-  return formatNumber(Math.round(valueMinor) / 100, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return formatNumber(Math.round(valueMinor) / 100, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 export function devContextLabel(context: AppContext): string {
-  const engine = context.workspace.handle.engine === 'indexeddb' ? 'IndexedDB' : context.workspace.handle.engine;
+  const engine =
+    context.workspace.handle.engine === 'indexeddb'
+      ? 'IndexedDB'
+      : context.workspace.handle.engine;
   return `محرك التخزين: ${engine}`;
 }
 
@@ -229,16 +323,26 @@ export function entityTile(options: {
     h(
       'div',
       { class: 'record-card__head' },
-      options.iconName ? h('span', { class: 'avatar' }, icon(options.iconName, 18)) : null,
+      options.iconName
+        ? h('span', { class: 'avatar' }, icon(options.iconName, 18))
+        : null,
       h(
         'div',
         { style: 'flex:1;min-inline-size:0' },
         options.href
-          ? h('h3', { class: 'record-card__title' }, h('a', { href: options.href, text: options.title }))
+          ? h(
+              'h3',
+              { class: 'record-card__title' },
+              h('a', { href: options.href, text: options.title }),
+            )
           : h('h3', { class: 'record-card__title', text: options.title }),
-        options.subtitle ? h('p', { class: 'text-xs text-3', text: options.subtitle }) : null,
+        options.subtitle
+          ? h('p', { class: 'text-xs text-3', text: options.subtitle })
+          : null,
       ),
-      options.actions ? h('div', { class: 'row', style: 'gap:2px' }, ...options.actions) : null,
+      options.actions
+        ? h('div', { class: 'row', style: 'gap:2px' }, ...options.actions)
+        : null,
     ),
   );
 }

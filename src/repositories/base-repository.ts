@@ -1,4 +1,11 @@
-import type { DatabaseAdapter, SqlParams, SqlRow, SqlValue } from '../db/adapter.ts';
+import { assertCaseIntegritySync } from '../cases/integrity.ts';
+import type { EngineRow } from '../portable/store.ts';
+import type {
+  DatabaseAdapter,
+  SqlParams,
+  SqlRow,
+  SqlValue,
+} from '../db/adapter.ts';
 import {
   AppError,
   ConflictError,
@@ -11,7 +18,7 @@ import type { AuditAction, AuditService } from '../services/audit-service.ts';
 import {
   syncEntityByTable,
   type SyncEntityDefinition,
-} from '../sync/entity-registry.ts';
+} from '../sync/current-registry.ts';
 import type { Clock } from '../util/clock.ts';
 import { toCanonicalTimestamp } from '../util/dates.ts';
 import { stableStringify } from '../util/stable.ts';
@@ -46,7 +53,10 @@ export interface ListFilter {
 
 export interface ListOptions {
   readonly filters?: readonly ListFilter[];
-  readonly orderBy?: { readonly column: string; readonly direction?: 'asc' | 'desc' };
+  readonly orderBy?: {
+    readonly column: string;
+    readonly direction?: 'asc' | 'desc';
+  };
   readonly limit?: number;
   readonly offset?: number;
   readonly includeDeleted?: boolean;
@@ -91,7 +101,10 @@ const IDENTIFIER_RE = /^[a-z_][a-z0-9_]*$/;
 
 function quoteIdentifier(identifier: string): string {
   if (!IDENTIFIER_RE.test(identifier)) {
-    throw new AppError('UNSUPPORTED_ENGINE', `invalid SQL identifier: ${identifier}`);
+    throw new AppError(
+      'UNSUPPORTED_ENGINE',
+      `invalid SQL identifier: ${identifier}`,
+    );
   }
   return `"${identifier}"`;
 }
@@ -99,20 +112,30 @@ function quoteIdentifier(identifier: string): string {
 function assertSqlValue(value: SqlValue, field: string): SqlValue {
   if (value === null || typeof value === 'string') return value;
   if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new ValidationError(`${field} must be finite`, { field });
+    if (!Number.isFinite(value))
+      throw new ValidationError(`${field} must be finite`, { field });
     return value;
   }
   if (typeof value === 'bigint') {
-    if (value > BigInt(Number.MAX_SAFE_INTEGER) || value < BigInt(Number.MIN_SAFE_INTEGER)) {
-      throw new ValidationError(`${field} is outside the supported integer range`, { field });
+    if (
+      value > BigInt(Number.MAX_SAFE_INTEGER) ||
+      value < BigInt(Number.MIN_SAFE_INTEGER)
+    ) {
+      throw new ValidationError(
+        `${field} is outside the supported integer range`,
+        { field },
+      );
     }
     return Number(value);
   }
-  throw new ValidationError(`${field} has an unsupported value type`, { field });
+  throw new ValidationError(`${field} has an unsupported value type`, {
+    field,
+  });
 }
 
 function auditValue(value: SqlValue): string | number | null {
-  if (value === null || typeof value === 'string' || typeof value === 'number') return value;
+  if (value === null || typeof value === 'string' || typeof value === 'number')
+    return value;
   return String(value);
 }
 
@@ -148,11 +171,19 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     this.repositoryFor = deps.repositoryFor;
 
     if (!IDENTIFIER_RE.test(definition.table)) {
-      throw new AppError('UNSUPPORTED_ENGINE', `invalid table name: ${definition.table}`);
+      throw new AppError(
+        'UNSUPPORTED_ENGINE',
+        `invalid table name: ${definition.table}`,
+      );
     }
-    const info = deps.db.query<{ name: string }>(`PRAGMA table_info(${quoteIdentifier(definition.table)})`);
+    const info = deps.db.query<{ name: string }>(
+      `PRAGMA table_info(${quoteIdentifier(definition.table)})`,
+    );
     if (info.length === 0) {
-      throw new AppError('UNSUPPORTED_ENGINE', `table not found: ${definition.table}`);
+      throw new AppError(
+        'UNSUPPORTED_ENGINE',
+        `table not found: ${definition.table}`,
+      );
     }
     this.columns = info.map((row) => row.name);
     this.primaryKey = definition.primaryKeyColumn;
@@ -186,11 +217,15 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     return toCanonicalTimestamp(this.clock.now());
   }
 
-  getById(id: string, options: { includeDeleted?: boolean } = {}): T | undefined {
+  getById(
+    id: string,
+    options: { includeDeleted?: boolean } = {},
+  ): T | undefined {
     assertUuid(id, 'id');
-    const sql = options.includeDeleted ?? false
-      ? `SELECT * FROM ${quoteIdentifier(this.definition.table)} WHERE ${quoteIdentifier(this.primaryKey)} = ?`
-      : `SELECT * FROM ${quoteIdentifier(this.definition.table)} WHERE ${quoteIdentifier(this.primaryKey)} = ? AND deleted_at IS NULL`;
+    const sql =
+      (options.includeDeleted ?? false)
+        ? `SELECT * FROM ${quoteIdentifier(this.definition.table)} WHERE ${quoteIdentifier(this.primaryKey)} = ?`
+        : `SELECT * FROM ${quoteIdentifier(this.definition.table)} WHERE ${quoteIdentifier(this.primaryKey)} = ? AND deleted_at IS NULL`;
     const row = this.db.get<SqlRow>(sql, [id]);
     return row ? (this.toRecord(row) as T) : undefined;
   }
@@ -203,7 +238,11 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
 
   insert(input: EntityInput, options: { id?: string } = {}): T {
     const requestedId = input.id as string | undefined;
-    if (options.id !== undefined && requestedId !== undefined && options.id !== requestedId) {
+    if (
+      options.id !== undefined &&
+      requestedId !== undefined &&
+      options.id !== requestedId
+    ) {
       throw new ValidationError('conflicting ids supplied');
     }
     const id = options.id ?? requestedId ?? newId();
@@ -211,18 +250,26 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
 
     for (const header of HEADER_COLUMNS) {
       if (header in input) {
-        throw new ValidationError(`field ${header} is managed by the repository`, { field: header });
+        throw new ValidationError(
+          `field ${header} is managed by the repository`,
+          { field: header },
+        );
       }
     }
     if (this.primaryKey !== 'id' && this.primaryKey in input) {
-      throw new ValidationError(`primary key must be supplied as id`, { field: this.primaryKey });
+      throw new ValidationError(`primary key must be supplied as id`, {
+        field: this.primaryKey,
+      });
     }
 
     const business: Record<string, SqlValue> = {};
     for (const [key, raw] of Object.entries(input)) {
       if (key === 'id') continue;
       if (!this.columns.includes(key)) {
-        throw new ValidationError(`unknown field for ${this.definition.code}: ${key}`, { field: key });
+        throw new ValidationError(
+          `unknown field for ${this.definition.code}: ${key}`,
+          { field: key },
+        );
       }
       business[key] = assertSqlValue(raw, key);
     }
@@ -246,10 +293,15 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
       VALUES (${columns.map(() => '?').join(', ')})`;
 
     return this.db.transaction((tx) => {
-      tx.run(sql, columns.map((column) => record[column] ?? null));
+      tx.run(
+        sql,
+        columns.map((column) => record[column] ?? null),
+      );
       const row = this.fetchRequired(tx, id);
+      assertCaseIntegritySync(tx, this.definition.table, row as EngineRow);
       const changedFields = columns.filter(
-        (column) => !HEADER_COLUMNS.includes(column as (typeof HEADER_COLUMNS)[number]),
+        (column) =>
+          !HEADER_COLUMNS.includes(column as (typeof HEADER_COLUMNS)[number]),
       );
       this.enqueueOutbox(tx, 'insert', id, row, changedFields);
       this.audit.record(tx, {
@@ -267,13 +319,17 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
 
   update(id: string, patch: EntityInput, options: UpdateOptions = {}): T {
     assertUuid(id, 'id');
-    if (this.definition.policy === 'append_only' || this.definition.policy === 'immutable') {
+    if (
+      this.definition.policy === 'append_only' ||
+      this.definition.policy === 'immutable'
+    ) {
       throw new ImmutableRecordError(this.definition.code, id);
     }
 
     const allowed = new Set(this.definition.mutableColumns);
     for (const key of Object.keys(patch)) {
-      if (key === 'id') throw new ValidationError('id cannot be changed', { field: 'id' });
+      if (key === 'id')
+        throw new ValidationError('id cannot be changed', { field: 'id' });
       if (!allowed.has(key)) {
         throw new ValidationError(
           `field ${key} is not mutable on ${this.definition.code}`,
@@ -281,7 +337,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
         );
       }
       if (!this.columns.includes(key)) {
-        throw new ValidationError(`unknown field for ${this.definition.code}: ${key}`, { field: key });
+        throw new ValidationError(
+          `unknown field for ${this.definition.code}: ${key}`,
+          { field: key },
+        );
       }
     }
 
@@ -295,6 +354,7 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
       if (Object.keys(changes).length === 0) return current as T;
 
       const updated = this.applyUpdate(tx, current, changes);
+      assertCaseIntegritySync(tx, this.definition.table, updated as EngineRow);
       this.enqueueOutbox(tx, 'update', id, updated, Object.keys(changes));
       const action: AuditAction = options.auditAction ?? 'update';
       this.audit.record(tx, {
@@ -350,7 +410,14 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
           [id],
         );
         for (const child of children) {
-          this.cascadeDeleteInternal(tx, childDefinition.code, child.id, batchId, entries, visited);
+          this.cascadeDeleteInternal(
+            tx,
+            childDefinition.code,
+            child.id,
+            batchId,
+            entries,
+            visited,
+          );
         }
       }
 
@@ -375,7 +442,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
           ],
         );
       }
-      tx.run('UPDATE deletion_batch SET affected_count = ? WHERE id = ?', [entries.length, batchId]);
+      tx.run('UPDATE deletion_batch SET affected_count = ? WHERE id = ?', [
+        entries.length,
+        batchId,
+      ]);
       this.audit.record(tx, {
         action: 'delete',
         entityType: this.definition.code,
@@ -398,7 +468,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     return this.db.transaction((tx) => {
       const current = this.fetchRequired(tx, id, true);
       if (current.deleted_at === null) {
-        throw new ConflictError('record is not deleted', 'NOT_DELETED', { entity: this.definition.code, id });
+        throw new ConflictError('record is not deleted', 'NOT_DELETED', {
+          entity: this.definition.code,
+          id,
+        });
       }
 
       const batch = tx.get<{ id: string }>(
@@ -411,7 +484,12 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
       );
 
       if (!batch) {
-        const restored = this.applyUpdate(tx, current, { deleted_at: null }, true);
+        const restored = this.applyUpdate(
+          tx,
+          current,
+          { deleted_at: null },
+          true,
+        );
         this.enqueueOutbox(tx, 'restore', id, restored, ['deleted_at']);
         this.audit.record(tx, {
           action: 'restore',
@@ -445,7 +523,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
         const row = repo.getRaw(tx, entry.entity_id, true);
         if (!row || row.deleted_at === null) continue;
         repo.applyRestoreInternal(tx, row);
-        restoredRows.push({ entityCode: entry.entity_type, id: entry.entity_id });
+        restoredRows.push({
+          entityCode: entry.entity_type,
+          id: entry.entity_id,
+        });
       }
 
       if (restoredRows.length === 0) {
@@ -456,7 +537,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
       }
 
       const now = this.now();
-      tx.run('UPDATE deletion_batch SET restored_at = ? WHERE id = ?', [now, batch.id]);
+      tx.run('UPDATE deletion_batch SET restored_at = ? WHERE id = ?', [
+        now,
+        batch.id,
+      ]);
 
       for (const restored of restoredRows) {
         this.safeSearch(tx, restored.id);
@@ -476,7 +560,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
 
   archive(id: string): T {
     const column = this.definition.archiveColumn;
-    if (!column) throw new ValidationError(`${this.definition.code} does not support archiving`);
+    if (!column)
+      throw new ValidationError(
+        `${this.definition.code} does not support archiving`,
+      );
     return this.db.transaction((tx) => {
       const current = this.fetchRequired(tx, id);
       if (current[column] !== null) return current as T;
@@ -496,7 +583,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
 
   unarchive(id: string): T {
     const column = this.definition.archiveColumn;
-    if (!column) throw new ValidationError(`${this.definition.code} does not support archiving`);
+    if (!column)
+      throw new ValidationError(
+        `${this.definition.code} does not support archiving`,
+      );
     return this.db.transaction((tx) => {
       const current = this.fetchRequired(tx, id);
       if (current[column] === null) return current as T;
@@ -518,14 +608,18 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     const built = this.buildWhere(options);
     if (built.empty) return [];
 
-    const order = options.orderBy ?? { column: 'updated_at', direction: 'desc' as const };
+    const order = options.orderBy ?? {
+      column: 'updated_at',
+      direction: 'desc' as const,
+    };
     if (!this.columns.includes(order.column)) {
       throw new ValidationError(`unknown order column: ${order.column}`);
     }
     const direction = order.direction === 'asc' ? 'ASC' : 'DESC';
     const limit = Math.trunc(options.limit ?? 50);
     const offset = Math.trunc(options.offset ?? 0);
-    if (limit <= 0) throw new ValidationError('limit must be greater than zero');
+    if (limit <= 0)
+      throw new ValidationError('limit must be greater than zero');
     if (offset < 0) throw new ValidationError('offset must not be negative');
 
     const sql = `SELECT * FROM ${quoteIdentifier(this.definition.table)}
@@ -537,21 +631,26 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
       .map((row) => this.toRecord(row) as T);
   }
 
-  count(options: Omit<ListOptions, 'limit' | 'offset' | 'orderBy'> = {}): number {
+  count(
+    options: Omit<ListOptions, 'limit' | 'offset' | 'orderBy'> = {},
+  ): number {
     const built = this.buildWhere(options);
     if (built.empty) return 0;
     const sql = `SELECT COUNT(*) AS c FROM ${quoteIdentifier(this.definition.table)} ${built.where}`;
     return this.db.get<{ c: number }>(sql, built.params)?.c ?? 0;
   }
 
-  private buildWhere(options: Omit<ListOptions, 'limit' | 'offset' | 'orderBy'>): {
+  private buildWhere(
+    options: Omit<ListOptions, 'limit' | 'offset' | 'orderBy'>,
+  ): {
     where: string;
     params: SqlValue[];
     empty: boolean;
   } {
     const conditions: string[] = [];
     const params: SqlValue[] = [];
-    if (!(options.includeDeleted ?? false)) conditions.push('deleted_at IS NULL');
+    if (!(options.includeDeleted ?? false))
+      conditions.push('deleted_at IS NULL');
 
     for (const filter of options.filters ?? []) {
       if (!this.columns.includes(filter.column)) {
@@ -569,7 +668,8 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
         const values = Array.isArray(filter.value) ? filter.value : [];
         if (values.length === 0) return { where: '', params: [], empty: true };
         conditions.push(`${column} IN (${values.map(() => '?').join(', ')})`);
-        for (const value of values as SqlValue[]) params.push(assertSqlValue(value, filter.column));
+        for (const value of values as SqlValue[])
+          params.push(assertSqlValue(value, filter.column));
         continue;
       }
       if (filter.value === undefined) {
@@ -587,7 +687,11 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
   }
 
   /** Internal helpers used by domain repositories and cascade operations. */
-  getRaw(tx: DatabaseAdapter, id: string, includeDeleted = false): EntityRecord | undefined {
+  getRaw(
+    tx: DatabaseAdapter,
+    id: string,
+    includeDeleted = false,
+  ): EntityRecord | undefined {
     const row = tx.get<SqlRow>(
       `SELECT * FROM ${quoteIdentifier(this.definition.table)}
        WHERE ${quoteIdentifier(this.primaryKey)} = ?${includeDeleted ? '' : ' AND deleted_at IS NULL'}`,
@@ -601,7 +705,11 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     this.enqueueOutbox(tx, 'restore', row.id, restored, ['deleted_at']);
   }
 
-  private fetchRequired(tx: DatabaseAdapter, id: string, includeDeleted = false): EntityRecord {
+  private fetchRequired(
+    tx: DatabaseAdapter,
+    id: string,
+    includeDeleted = false,
+  ): EntityRecord {
     const row = this.getRaw(tx, id, includeDeleted);
     if (!row) throw new NotFoundError(this.definition.code, id);
     return row;
@@ -614,7 +722,9 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     allowDeleted = false,
   ): EntityRecord {
     const next: Record<string, SqlValue> = {
-      ...Object.fromEntries(Object.keys(patch).map((key) => [key, patch[key] ?? null])),
+      ...Object.fromEntries(
+        Object.keys(patch).map((key) => [key, patch[key] ?? null]),
+      ),
       updated_at: this.now(),
       revision: current.revision + 1,
       sync_status: 'pending',
@@ -661,7 +771,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
       if (rule.policy !== 'cascade') continue;
       const childDefinition = syncEntityByTable(rule.table);
       if (!childDefinition) {
-        throw new AppError('UNSUPPORTED_ENGINE', `unknown dependent table ${rule.table}`);
+        throw new AppError(
+          'UNSUPPORTED_ENGINE',
+          `unknown dependent table ${rule.table}`,
+        );
       }
       const children = tx.query<{ id: string }>(
         `SELECT ${quoteIdentifier(childDefinition.primaryKeyColumn)} AS id
@@ -670,7 +783,14 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
         [id],
       );
       for (const child of children) {
-        this.cascadeDeleteInternal(tx, childDefinition.code, child.id, batchId, entries, visited);
+        this.cascadeDeleteInternal(
+          tx,
+          childDefinition.code,
+          child.id,
+          batchId,
+          entries,
+          visited,
+        );
       }
     }
 
@@ -681,7 +801,8 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
   }
 
   private assertNoBlockingDependents(tx: DatabaseAdapter, id: string): void {
-    const blockers: Array<{ table: string; labelAr: string; count: number }> = [];
+    const blockers: Array<{ table: string; labelAr: string; count: number }> =
+      [];
     for (const rule of this.definition.dependents) {
       if (rule.policy !== 'block') continue;
       const row = tx.get<{ c: number }>(
@@ -690,7 +811,8 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
         [id],
       );
       const count = row?.c ?? 0;
-      if (count > 0) blockers.push({ table: rule.table, labelAr: rule.labelAr, count });
+      if (count > 0)
+        blockers.push({ table: rule.table, labelAr: rule.labelAr, count });
     }
     if (blockers.length > 0) {
       throw new ConflictError(
@@ -708,9 +830,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     row: EntityRecord,
     changedFields: readonly string[],
   ): void {
-    const sequence = tx.get<{ next: number }>(
-      'SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM sync_outbox',
-    )?.next ?? 1;
+    const sequence =
+      tx.get<{ next: number }>(
+        'SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM sync_outbox',
+      )?.next ?? 1;
     tx.run(
       `INSERT INTO sync_outbox
         (id, sequence, entity_type, entity_id, operation, payload_json, changed_fields_json,
@@ -731,6 +854,16 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
   }
 
   private safeSearch(tx: DatabaseAdapter, id: string): void {
+    tx.run(
+      "DELETE FROM app_meta WHERE key IN ('sequence.audit_log','sequence.sync_outbox','sequence.search_document')",
+    );
+    // Native repositories have a synchronous search API. The portable profile
+    // regenerates its extended facets on its next open after any native edit.
+    if (tx.get("SELECT value FROM app_meta WHERE key='cases.index_version'"))
+      tx.run(
+        "UPDATE app_meta SET value='0',updated_at=? WHERE key='cases.index_version'",
+        [this.now()],
+      );
     try {
       this.search.handleEntityChange(tx, this.definition.code, id);
     } catch {
@@ -748,7 +881,9 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     }
   }
 
-  private changesForValues(values: Readonly<Record<string, SqlValue>>): Record<string, { to: string | number | null }> {
+  private changesForValues(
+    values: Readonly<Record<string, SqlValue>>,
+  ): Record<string, { to: string | number | null }> {
     const changes: Record<string, { to: string | number | null }> = {};
     for (const [key, value] of Object.entries(values)) {
       changes[key] = { to: auditValue(value) };
@@ -759,10 +894,19 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
   private changesForDiff(
     before: EntityRecord,
     patch: Readonly<Record<string, SqlValue>>,
-  ): Record<string, { from: string | number | null; to: string | number | null }> {
-    const changes: Record<string, { from: string | number | null; to: string | number | null }> = {};
+  ): Record<
+    string,
+    { from: string | number | null; to: string | number | null }
+  > {
+    const changes: Record<
+      string,
+      { from: string | number | null; to: string | number | null }
+    > = {};
     for (const [key, value] of Object.entries(patch)) {
-      changes[key] = { from: auditValue(before[key] ?? null), to: auditValue(value) };
+      changes[key] = {
+        from: auditValue(before[key] ?? null),
+        to: auditValue(value),
+      };
     }
     return changes;
   }
@@ -771,7 +915,10 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     const record = { ...row } as Record<string, SqlValue>;
     const id = record[this.primaryKey];
     if (typeof id !== 'string') {
-      throw new AppError('UNSUPPORTED_ENGINE', `row in ${this.definition.table} has no string id`);
+      throw new AppError(
+        'UNSUPPORTED_ENGINE',
+        `row in ${this.definition.table} has no string id`,
+      );
     }
     record.id = id;
     return record as EntityRecord;
@@ -782,19 +929,30 @@ export class BaseRepository<T extends EntityRecord = EntityRecord> {
     return this.db.query<T>(sql, params);
   }
 
-  protected get<T extends SqlRow>(sql: string, params?: SqlParams): T | undefined {
+  protected get<T extends SqlRow>(
+    sql: string,
+    params?: SqlParams,
+  ): T | undefined {
     return this.db.get<T>(sql, params);
   }
 
-  protected run(sql: string, params?: SqlParams): { changes: number; lastInsertRowid: number } {
+  protected run(
+    sql: string,
+    params?: SqlParams,
+  ): { changes: number; lastInsertRowid: number } {
     return this.db.run(sql, params);
   }
 
-  protected transaction<TResult>(fn: (tx: DatabaseAdapter) => TResult): TResult {
+  protected transaction<TResult>(
+    fn: (tx: DatabaseAdapter) => TResult,
+  ): TResult {
     return this.db.transaction(fn);
   }
 
-  protected auditRecord(tx: DatabaseAdapter, input: Parameters<AuditService['record']>[1]): void {
+  protected auditRecord(
+    tx: DatabaseAdapter,
+    input: Parameters<AuditService['record']>[1],
+  ): void {
     this.audit.record(tx, input);
   }
 

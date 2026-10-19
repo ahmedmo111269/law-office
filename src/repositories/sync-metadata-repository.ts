@@ -1,6 +1,6 @@
 import type { SqlRow } from '../db/adapter.ts';
 import { NotFoundError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
 import type { Clock } from '../util/clock.ts';
 import { toCanonicalTimestamp } from '../util/dates.ts';
 import { newId } from '../util/uuid.ts';
@@ -73,9 +73,10 @@ export class SyncMetadataRepository {
       sent: Number(row?.sent ?? 0),
       failed: Number(row?.failed ?? 0),
       openConflicts: conflicts?.c ?? 0,
-      lastQueuedAt: row?.last_queued_at === null || row?.last_queued_at === undefined
-        ? null
-        : String(row.last_queued_at),
+      lastQueuedAt:
+        row?.last_queued_at === null || row?.last_queued_at === undefined
+          ? null
+          : String(row.last_queued_at),
     };
   }
 
@@ -99,7 +100,10 @@ export class SyncMetadataRepository {
     const now = toCanonicalTimestamp(this.clock.now());
     this.db.transaction((tx) => {
       for (const id of ids) {
-        const row = tx.get<OutboxRow>('SELECT * FROM sync_outbox WHERE id = ?', [id]);
+        const row = tx.get<OutboxRow>(
+          'SELECT * FROM sync_outbox WHERE id = ?',
+          [id],
+        );
         if (!row) throw new NotFoundError('sync_outbox', id);
         tx.run(
           `UPDATE sync_outbox SET state = 'sent', sent_at = ?, last_attempt_at = ?,
@@ -183,7 +187,10 @@ export class SyncMetadataRepository {
     );
   }
 
-  resolveConflict(id: string, resolution: 'local' | 'remote' | 'merged' | 'manual'): void {
+  resolveConflict(
+    id: string,
+    resolution: 'local' | 'remote' | 'merged' | 'manual',
+  ): void {
     const now = toCanonicalTimestamp(this.clock.now());
     const result = this.db.run(
       `UPDATE sync_conflict SET status = 'resolved', resolution = ?, resolved_at = ?, updated_at = ?

@@ -1,6 +1,10 @@
 import { AppError, ValidationError } from '../errors.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 import type { LookupRepository } from './lookup-repository.ts';
 
 export interface CourtRecord extends EntityRecord {
@@ -28,7 +32,10 @@ export class CourtRepository {
   constructor(deps: RepositoryDependencies, lookups: LookupRepository) {
     this.lookups = lookups;
     this.courts = new BaseRepository<CourtRecord>(deps, getSyncEntity('court'));
-    this.circuits = new BaseRepository<CourtCircuitRecord>(deps, getSyncEntity('court_circuit'));
+    this.circuits = new BaseRepository<CourtCircuitRecord>(
+      deps,
+      getSyncEntity('court_circuit'),
+    );
   }
 
   createCourt(input: {
@@ -40,13 +47,20 @@ export class CourtRepository {
     phone?: string;
     notes?: string;
   }): CourtRecord {
-    if (!input.name?.trim()) throw new ValidationError('court name is required');
+    if (!input.name?.trim())
+      throw new ValidationError('court name is required');
     if (input.parentId) this.courts.requireById(input.parentId);
     return this.courts.insert({
       name: input.name.trim(),
-      court_kind_id: this.lookups.resolveOptional('court_kind', input.courtKindCode),
+      court_kind_id: this.lookups.resolveOptional(
+        'court_kind',
+        input.courtKindCode,
+      ),
       parent_id: input.parentId ?? null,
-      governorate_id: this.lookups.resolveOptional('governorate', input.governorateCode),
+      governorate_id: this.lookups.resolveOptional(
+        'governorate',
+        input.governorateCode,
+      ),
       address: input.address ?? null,
       phone: input.phone ?? null,
       notes: input.notes ?? null,
@@ -55,10 +69,15 @@ export class CourtRepository {
     });
   }
 
-  createCircuit(courtId: string, input: { name: string; location?: string; notes?: string }): CourtCircuitRecord {
+  createCircuit(
+    courtId: string,
+    input: { name: string; location?: string; notes?: string },
+  ): CourtCircuitRecord {
     const court = this.courts.requireById(courtId);
-    if (court.is_active !== 1) throw new AppError('INVALID_STATE', 'court is inactive');
-    if (!input.name?.trim()) throw new ValidationError('circuit name is required');
+    if (court.is_active !== 1)
+      throw new AppError('INVALID_STATE', 'court is inactive');
+    if (!input.name?.trim())
+      throw new ValidationError('circuit name is required');
     return this.circuits.insert({
       court_id: courtId,
       name: input.name.trim(),
@@ -76,20 +95,29 @@ export class CourtRepository {
     return this.circuits.requireById(id);
   }
 
-  requireCircuitOfCourt(circuitId: string, courtId: string): CourtCircuitRecord {
+  requireCircuitOfCourt(
+    circuitId: string,
+    courtId: string,
+  ): CourtCircuitRecord {
     const circuit = this.circuits.requireById(circuitId);
     if (circuit.court_id !== courtId) {
-      throw new ValidationError('circuit does not belong to the selected court', {
-        circuitId,
-        courtId,
-      });
+      throw new ValidationError(
+        'circuit does not belong to the selected court',
+        {
+          circuitId,
+          courtId,
+        },
+      );
     }
     return circuit;
   }
 
-  listCourts(options: { activeOnly?: boolean; limit?: number } = {}): CourtRecord[] {
+  listCourts(
+    options: { activeOnly?: boolean; limit?: number } = {},
+  ): CourtRecord[] {
     return this.courts.list({
-      filters: (options.activeOnly ?? true) ? [{ column: 'is_active', value: 1 }] : [],
+      filters:
+        (options.activeOnly ?? true) ? [{ column: 'is_active', value: 1 }] : [],
       limit: options.limit ?? 100,
       orderBy: { column: 'name', direction: 'asc' },
     });
@@ -103,7 +131,10 @@ export class CourtRepository {
     });
   }
 
-  getCourtFull(id: string): { court: CourtRecord; circuits: CourtCircuitRecord[] } {
+  getCourtFull(id: string): {
+    court: CourtRecord;
+    circuits: CourtCircuitRecord[];
+  } {
     return { court: this.getCourt(id), circuits: this.listCircuits(id) };
   }
 }

@@ -1,20 +1,33 @@
 import 'fake-indexeddb/auto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { IndexedDbDatabase, IDB_APPLICATION_ID } from '../src/db/indexeddb/indexeddb-adapter.ts';
+import {
+  IndexedDbDatabase,
+  IDB_APPLICATION_ID,
+} from '../src/db/indexeddb/indexeddb-adapter.ts';
 import { IdbMigrationManager } from '../src/db/indexeddb/idb-migration-manager.ts';
 import { IndexedDbStore } from '../src/portable/store.ts';
 import { PortableLawOffice } from '../src/portable/portable-database.ts';
-import { PORTABLE_SCHEMA } from '../src/schema/v1/portable-schema.ts';
+import { PORTABLE_SCHEMA } from '../src/schema/current.ts';
 import { FixedClock } from '../src/util/clock.ts';
 
 let dbCounter = 0;
 
-async function freshDatabase(name?: string): Promise<{ idb: IndexedDbDatabase; store: IndexedDbStore; db: PortableLawOffice; name: string }> {
+async function freshDatabase(
+  name?: string,
+): Promise<{
+  idb: IndexedDbDatabase;
+  store: IndexedDbStore;
+  db: PortableLawOffice;
+  name: string;
+}> {
   dbCounter += 1;
   const dbName = name ?? `lawo-test-${dbCounter}-${Date.now()}`;
   const idb = await IndexedDbDatabase.open({ name: dbName });
-  const migrations = new IdbMigrationManager(idb, { appVersion: '0.1.0-test', clock: new FixedClock('2026-10-18T09:00:00.000Z').now });
+  const migrations = new IdbMigrationManager(idb, {
+    appVersion: '0.1.0-test',
+    clock: () => new Date('2026-10-18T09:00:00.000Z'),
+  });
   await migrations.migrate();
   const store = new IndexedDbStore(idb);
   const db = await PortableLawOffice.open({
@@ -38,15 +51,18 @@ test('indexeddb: opens a real object store for every schema table and index', as
       const actual = byName.get(table.name)!;
       assert.ok(actual, `missing store ${table.name}`);
       for (const index of table.indexes) {
-        assert.ok(actual.indexes.includes(index.name), `missing index ${table.name}.${index.name}`);
+        assert.ok(
+          actual.indexes.includes(index.name),
+          `missing index ${table.name}.${index.name}`,
+        );
       }
     }
     const integrity = await idb.integrityCheck();
     assert.equal(integrity.ok, true, integrity.errors.join('\n'));
-    assert.equal(integrity.tables, 57);
+    assert.equal(integrity.tables, 59);
     const meta = await idb.readMeta();
     assert.equal(meta.application_id, String(IDB_APPLICATION_ID));
-    assert.equal(meta.schema_version, '1');
+    assert.equal(meta.schema_version, '2');
     assert.equal(meta.engine, 'indexeddb');
     assert.ok(((await db.stats()).audit_log ?? 0) >= 1);
   } finally {
@@ -61,13 +77,17 @@ test('indexeddb: seeds reference data once with identical deterministic ids', as
     lookup_item: await first.store.count('lookup_item'),
     sync_entity_type: await first.store.count('sync_entity_type'),
   };
-  assert.deepEqual(counts, { lookup_list: 54, lookup_item: 374, sync_entity_type: 43 });
+  assert.deepEqual(counts, {
+    lookup_list: 58,
+    lookup_item: 505,
+    sync_entity_type: 45,
+  });
   const firstList = await first.db.lookup('file_status', 'open');
   await first.store.close();
 
   const second = await freshDatabase(first.name);
   try {
-    assert.equal(await second.store.count('lookup_list'), 54);
+    assert.equal(await second.store.count('lookup_list'), 58);
     const list = await second.db.lookup('file_status', 'open');
     assert.equal(list.id, firstList.id);
     const devices = await second.store.getAll('local_device');
@@ -89,7 +109,12 @@ test('indexeddb: enforces NOT NULL, CHECK, foreign keys and unique indexes witho
       (error: Error) => /required/.test(constraintText(error)),
     );
     await assert.rejects(
-      () => db.insert('party', { kind: 'robot', display_name: 'x', status_id: activeStatus }),
+      () =>
+        db.insert('party', {
+          kind: 'robot',
+          display_name: 'x',
+          status_id: activeStatus,
+        }),
       (error: Error) => /CHECK failed/.test(constraintText(error)),
     );
     await assert.rejects(
@@ -131,17 +156,33 @@ test('indexeddb: partial unique indexes match the SQLite predicate semantics', a
   const { db } = await freshDatabase();
   try {
     const court = await db.createCourt({ name: 'محكمة القاهرة' });
-    const first = await db.createCase({ caseNumber: '100', caseYear: 2026, courtId: String(court.id) });
+    const first = await db.createCase({
+      caseNumber: '100',
+      caseYear: 2026,
+      courtId: String(court.id),
+    });
     await assert.rejects(
-      () => db.createCase({ caseNumber: '100', caseYear: 2026, courtId: String(court.id) }),
+      () =>
+        db.createCase({
+          caseNumber: '100',
+          caseYear: 2026,
+          courtId: String(court.id),
+        }),
       (error: Error & { code?: string }) => error.code === 'UNIQUE_VIOLATION',
     );
     await db.softDelete('legal_case', String(first.id));
-    const second = await db.createCase({ caseNumber: '100', caseYear: 2026, courtId: String(court.id) });
+    const second = await db.createCase({
+      caseNumber: '100',
+      caseYear: 2026,
+      courtId: String(court.id),
+    });
     assert.notEqual(second.id, first.id);
     // Restoring the older row now collides with the replacement, exactly as the
     // SQLite unique index would refuse it.
-    await assert.rejects(() => db.restore('legal_case', String(first.id)), /unique index/i);
+    await assert.rejects(
+      () => db.restore('legal_case', String(first.id)),
+      /unique index/i,
+    );
   } finally {
     await db.store.close();
   }
@@ -183,11 +224,17 @@ test('indexeddb: a failing statement rolls the whole transaction back', async ()
 
 test('indexeddb: data survives closing and reopening the database', async () => {
   const first = await freshDatabase();
-  const person = (await first.db.createPerson({ firstName: 'هدى', lastName: 'سالم' })) as {
+  const person = (await first.db.createPerson({
+    firstName: 'هدى',
+    lastName: 'سالم',
+  })) as {
     party: Record<string, string>;
   };
   const partyId = String(person.party.id);
-  const file = await first.db.createFile({ title: 'ملف دائم', clientPartyIds: [partyId] });
+  const file = await first.db.createFile({
+    title: 'ملف دائم',
+    clientPartyIds: [partyId],
+  });
   await first.store.close();
 
   const reopened = await freshDatabase(first.name);
@@ -197,7 +244,10 @@ test('indexeddb: data survives closing and reopening the database', async () => 
     assert.equal(stored.display_name, 'هدى سالم');
     const fileFull = await reopened.db.getFileFull(String(file.id));
     assert.equal(fileFull?.parties.length, 1);
-    const reopenedDevice = await reopened.store.get('app_meta', 'local.device_id');
+    const reopenedDevice = await reopened.store.get(
+      'app_meta',
+      'local.device_id',
+    );
     assert.equal(typeof reopenedDevice?.value, 'string');
   } finally {
     await reopened.store.close();
@@ -207,18 +257,27 @@ test('indexeddb: data survives closing and reopening the database', async () => 
 test('indexeddb: backup export verifies and restores all relations', async () => {
   const { db } = await freshDatabase();
   try {
-    const person = (await db.createPerson({ firstName: 'كريم', lastName: 'فؤاد' })) as {
+    const person = (await db.createPerson({
+      firstName: 'كريم',
+      lastName: 'فؤاد',
+    })) as {
       party: Record<string, string>;
     };
     const court = await db.createCourt({ name: 'محكمة الجيزة' });
-    const file = await db.createFile({ title: 'ملف نسخ', clientPartyIds: [String(person.party.id)] });
+    const file = await db.createFile({
+      title: 'ملف نسخ',
+      clientPartyIds: [String(person.party.id)],
+    });
     const legalCase = await db.createCase({
       caseNumber: '555',
       caseYear: 2026,
       courtId: String(court.id),
       fileIds: [String(file.id)],
     });
-    await db.scheduleHearing({ caseId: String(legalCase.id), scheduledAt: '2027-02-01T09:00:00.000Z' });
+    await db.scheduleHearing({
+      caseId: String(legalCase.id),
+      scheduledAt: '2027-02-01T09:00:00.000Z',
+    });
     const backup = await db.exportBackup();
     assert.equal(backup.format, 'lawo-portable-backup');
     assert.equal(backup.sha256.length, 64);
@@ -232,13 +291,18 @@ test('indexeddb: backup export verifies and restores all relations', async () =>
     assert.deepEqual(after, before);
     const fileFull = await db.getFileFull(String(file.id));
     assert.equal(fileFull?.parties.length, 1);
-    assert.equal((await db.getCaseFull(String(legalCase.id))).hearings.length, 1);
+    assert.equal(
+      (await db.getCaseFull(String(legalCase.id))).hearings.length,
+      1,
+    );
 
     const tampered = JSON.parse(JSON.stringify(backup));
     tampered.tables.party[0].display_name = 'اسم مُعدَّل';
     const tamperedVerification = await db.verifyBackup(tampered);
     assert.equal(tamperedVerification.valid, false);
-    assert.ok(tamperedVerification.errors.some((error) => /checksum/.test(error)));
+    assert.ok(
+      tamperedVerification.errors.some((error) => /checksum/.test(error)),
+    );
     await assert.rejects(() => db.restoreBackup(tampered), /verification/);
   } finally {
     await db.store.close();
@@ -250,12 +314,17 @@ test('indexeddb: migration ledger is recorded, verified and tamper-evident', asy
   try {
     const manager = new IdbMigrationManager(idb, { appVersion: '0.1.0-test' });
     const applied = await manager.applied();
-    assert.equal(applied.length, 1);
+    assert.equal(applied.length, 2);
     assert.equal(applied[0]!.version, 1);
+    assert.equal(applied[1]!.version, 2);
+    assert.equal(applied[1]!.name, 'case_intake_and_procedural_history');
     assert.equal(applied[0]!.checksum.length, 8);
     assert.equal((await manager.verify()).valid, true);
 
-    await idb.put('schema_migration', { ...(await idb.get('schema_migration', 1 as unknown as string))!, checksum: 'deadbeef' });
+    await idb.put('schema_migration', {
+      ...(await idb.get('schema_migration', 1 as unknown as string))!,
+      checksum: 'deadbeef',
+    });
     const verify = await manager.verify();
     assert.equal(verify.valid, false);
     assert.ok(verify.errors.some((error) => /checksum/.test(error)));
@@ -268,11 +337,24 @@ test('indexeddb: migration ledger is recorded, verified and tamper-evident', asy
 test('indexeddb: search and filters work on Arabic text without a server', async () => {
   const { db } = await freshDatabase();
   try {
-    const person = (await db.createPerson({ firstName: 'أحمد', middleName: 'مصطفى', lastName: 'الشاذلي' })) as {
+    const person = (await db.createPerson({
+      firstName: 'أحمد',
+      middleName: 'مصطفى',
+      lastName: 'الشاذلي',
+    })) as {
       party: Record<string, string>;
     };
-    await db.recordJudgment({ caseId: (await db.createCase({ caseNumber: '77', caseYear: 2026, fileIds: [] })).id as string, issuedOn: '2026-05-01', operativePart: 'إلزام المدعى عليه بالتعويض' });
-    await db.createTask({ title: 'مراجعة مذكرة الدفاع', dueAt: '2026-11-01T00:00:00.000Z' });
+    await db.recordJudgment({
+      caseId: (
+        await db.createCase({ caseNumber: '77', caseYear: 2026, fileIds: [] })
+      ).id as string,
+      issuedOn: '2026-05-01',
+      operativePart: 'إلزام المدعى عليه بالتعويض',
+    });
+    await db.createTask({
+      title: 'مراجعة مذكرة الدفاع',
+      dueAt: '2026-11-01T00:00:00.000Z',
+    });
     const normalized = await db.search('احمد');
     assert.equal(normalized.length, 1);
     assert.equal(normalized[0]!.entityType, 'party');
@@ -310,7 +392,10 @@ test('indexeddb: numbering is sequential and survives restart', async () => {
 test('indexeddb: soft delete cascades, writes a deletion batch and restores', async () => {
   const { db, store } = await freshDatabase();
   try {
-    const document = await db.registerDocument({ title: 'مستند للحذف', docTypeCode: 'other' });
+    const document = await db.registerDocument({
+      title: 'مستند للحذف',
+      docTypeCode: 'other',
+    });
     const version = await db.addDocumentVersion(String(document.id), {
       fileName: 'delete-me.pdf',
       storageKind: 'local_file',
@@ -319,8 +404,16 @@ test('indexeddb: soft delete cascades, writes a deletion batch and restores', as
     const deleted = await db.softDelete('document', String(document.id));
     assert.equal(deleted.affectedCount, 2);
     assert.equal(await db.get('document', String(document.id)), undefined);
-    assert.notEqual(await store.get('document_version', String(version.id)), undefined);
-    assert.notEqual(await store.get('document_version', String(version.id))!.then((row) => row?.deleted_at), null);
+    assert.notEqual(
+      await store.get('document_version', String(version.id)),
+      undefined,
+    );
+    assert.notEqual(
+      await store
+        .get('document_version', String(version.id))!
+        .then((row) => row?.deleted_at),
+      null,
+    );
     const batch = await store.get('deletion_batch', deleted.batchId);
     assert.equal(batch?.restored_at, null);
     assert.equal(Number(batch?.affected_count), 2);
@@ -337,11 +430,20 @@ test('indexeddb: soft delete cascades, writes a deletion batch and restores', as
 test('indexeddb: finance rules match SQLite (allocation bounds, reversal, balances)', async () => {
   const { db } = await freshDatabase();
   try {
-    const person = (await db.createPerson({ firstName: 'ليلى', lastName: 'حسن' })) as {
+    const person = (await db.createPerson({
+      firstName: 'ليلى',
+      lastName: 'حسن',
+    })) as {
       party: Record<string, string>;
     };
-    const file = await db.createFile({ title: 'ملف مالي', clientPartyIds: [String(person.party.id)] });
-    const account = await db.createAccount({ name: 'الخزينة', openingBalanceMinor: 100000 });
+    const file = await db.createFile({
+      title: 'ملف مالي',
+      clientPartyIds: [String(person.party.id)],
+    });
+    const account = await db.createAccount({
+      name: 'الخزينة',
+      openingBalanceMinor: 100000,
+    });
     const charge = await db.createCharge({
       clientPartyId: String(person.party.id),
       fileId: String(file.id),
@@ -355,7 +457,10 @@ test('indexeddb: finance rules match SQLite (allocation bounds, reversal, balanc
       clientPartyId: String(person.party.id),
       fileId: String(file.id),
     });
-    await assert.rejects(() => db.allocate(String(payment.id), String(charge.id), 300000), /exceeds/);
+    await assert.rejects(
+      () => db.allocate(String(payment.id), String(charge.id), 300000),
+      /exceeds/,
+    );
     await db.allocate(String(payment.id), String(charge.id), 200000);
     assert.deepEqual(await db.chargeBalance(String(charge.id)), {
       amountMinor: 300000,
@@ -373,13 +478,21 @@ test('indexeddb: finance rules match SQLite (allocation bounds, reversal, balanc
 test('indexeddb: audit trail, revision bumps and outbox rows are engine-neutral', async () => {
   const { db, store } = await freshDatabase();
   try {
-    const person = (await db.createPerson({ firstName: 'نور', lastName: 'الدين' })) as {
+    const person = (await db.createPerson({
+      firstName: 'نور',
+      lastName: 'الدين',
+    })) as {
       party: Record<string, string>;
     };
-    const updated = await db.update('party', String(person.party.id), { notes: 'ملاحظة جديدة' });
+    const updated = await db.update('party', String(person.party.id), {
+      notes: 'ملاحظة جديدة',
+    });
     assert.equal(updated.revision, 2);
     assert.equal(updated.sync_status, 'pending');
-    await assert.rejects(() => db.update('party', String(person.party.id), { id: 'x' }), /id cannot be changed/);
+    await assert.rejects(
+      () => db.update('party', String(person.party.id), { id: 'x' }),
+      /id cannot be changed/,
+    );
     const audit = await store.getAll('audit_log');
     const actions = audit.map((row) => row.action);
     assert.ok(actions.includes('setup'));
@@ -388,8 +501,12 @@ test('indexeddb: audit trail, revision bumps and outbox rows are engine-neutral'
     const outbox = await store.getAll('sync_outbox');
     assert.ok(outbox.length >= 3);
     assert.ok(outbox.every((row) => row.state === 'pending'));
-    assert.ok(outbox.some((row) => row.entity_type === 'party' && row.operation === 'update'));
-    assert.equal(await store.count('schema_migration'), 1);
+    assert.ok(
+      outbox.some(
+        (row) => row.entity_type === 'party' && row.operation === 'update',
+      ),
+    );
+    assert.equal(await store.count('schema_migration'), 2);
   } finally {
     await db.store.close();
   }
@@ -404,10 +521,16 @@ test('indexeddb: engine never calls the network', async () => {
     throw new Error('network access is not allowed');
   }) as typeof globalThis.fetch;
   try {
-    const person = (await db.createPerson({ firstName: 'رامي', lastName: 'خليل' })) as {
+    const person = (await db.createPerson({
+      firstName: 'رامي',
+      lastName: 'خليل',
+    })) as {
       party: Record<string, string>;
     };
-    await db.createFile({ title: 'بدون شبكة', clientPartyIds: [String(person.party.id)] });
+    await db.createFile({
+      title: 'بدون شبكة',
+      clientPartyIds: [String(person.party.id)],
+    });
     await db.search('رامي');
     await db.exportBackup();
     assert.equal(networkAttempts, 0);

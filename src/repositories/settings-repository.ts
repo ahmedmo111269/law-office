@@ -1,7 +1,11 @@
 import { NotFoundError, ValidationError } from '../errors.ts';
 import { SEED_OFFICE_SETTINGS } from '../schema/v1/seed.ts';
-import { getSyncEntity } from '../sync/entity-registry.ts';
-import { BaseRepository, type EntityRecord, type RepositoryDependencies } from './base-repository.ts';
+import { getSyncEntity } from '../sync/current-registry.ts';
+import {
+  BaseRepository,
+  type EntityRecord,
+  type RepositoryDependencies,
+} from './base-repository.ts';
 
 export type SettingValueType = 'string' | 'number' | 'boolean' | 'json';
 
@@ -12,14 +16,19 @@ export interface SettingRecord extends EntityRecord {
   description: string | null;
 }
 
-const DEFAULTS = new Map(SEED_OFFICE_SETTINGS.map((setting) => [setting.key, setting]));
+const DEFAULTS = new Map(
+  SEED_OFFICE_SETTINGS.map((setting) => [setting.key, setting]),
+);
 const KEY_RE = /^[a-z][a-z0-9_.-]{0,100}$/;
 
 export class SettingsRepository {
   private readonly repo: BaseRepository<SettingRecord>;
 
   constructor(deps: RepositoryDependencies) {
-    this.repo = new BaseRepository<SettingRecord>(deps, getSyncEntity('office_setting'));
+    this.repo = new BaseRepository<SettingRecord>(
+      deps,
+      getSyncEntity('office_setting'),
+    );
   }
 
   get(key: string): SettingRecord | undefined {
@@ -46,7 +55,10 @@ export class SettingsRepository {
   }
 
   getNumber(key: string, fallback?: number): number {
-    const value = this.getString(key, fallback === undefined ? undefined : String(fallback));
+    const value = this.getString(
+      key,
+      fallback === undefined ? undefined : String(fallback),
+    );
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) {
       throw new ValidationError(`setting ${key} is not a number`);
@@ -55,7 +67,10 @@ export class SettingsRepository {
   }
 
   getBoolean(key: string, fallback?: boolean): boolean {
-    const raw = this.getString(key, fallback === undefined ? undefined : String(fallback)).toLowerCase();
+    const raw = this.getString(
+      key,
+      fallback === undefined ? undefined : String(fallback),
+    ).toLowerCase();
     if (['true', '1', 'yes'].includes(raw)) return true;
     if (['false', '0', 'no'].includes(raw)) return false;
     throw new ValidationError(`setting ${key} is not a boolean`);
@@ -71,7 +86,10 @@ export class SettingsRepository {
   }
 
   listAll(): SettingRecord[] {
-    return this.repo.list({ limit: 1000, orderBy: { column: 'key', direction: 'asc' } });
+    return this.repo.list({
+      limit: 1000,
+      orderBy: { column: 'key', direction: 'asc' },
+    });
   }
 
   set(
@@ -80,7 +98,8 @@ export class SettingsRepository {
     valueType?: SettingValueType,
     description?: string,
   ): SettingRecord {
-    if (!KEY_RE.test(key)) throw new ValidationError('invalid setting key', { key });
+    if (!KEY_RE.test(key))
+      throw new ValidationError('invalid setting key', { key });
     const type = valueType ?? DEFAULTS.get(key)?.valueType ?? 'string';
     const stringValue = this.normaliseValue(value, type);
     const existing = this.get(key);
@@ -101,7 +120,10 @@ export class SettingsRepository {
     });
   }
 
-  private normaliseValue(value: string | number | boolean, type: SettingValueType): string {
+  private normaliseValue(
+    value: string | number | boolean,
+    type: SettingValueType,
+  ): string {
     switch (type) {
       case 'number': {
         const numberValue = typeof value === 'number' ? value : Number(value);
@@ -149,8 +171,13 @@ export class DeviceSettingsRepository {
     )?.value;
   }
 
-  set(key: string, value: string, valueType: SettingValueType = 'string'): void {
-    if (!KEY_RE.test(key)) throw new ValidationError('invalid device setting key', { key });
+  set(
+    key: string,
+    value: string,
+    valueType: SettingValueType = 'string',
+  ): void {
+    if (!KEY_RE.test(key))
+      throw new ValidationError('invalid device setting key', { key });
     const normalised =
       valueType === 'json'
         ? JSON.stringify(JSON.parse(value))
@@ -179,10 +206,10 @@ export class DeviceSettingsRepository {
   }
 
   remove(key: string): void {
-    this.deps.db.run('DELETE FROM device_setting WHERE device_id = ? AND key = ?', [
-      this.deps.deviceId,
-      key,
-    ]);
+    this.deps.db.run(
+      'DELETE FROM device_setting WHERE device_id = ? AND key = ?',
+      [this.deps.deviceId, key],
+    );
   }
 
   all(): Array<{ key: string; value: string; value_type: SettingValueType }> {

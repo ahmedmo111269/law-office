@@ -9,7 +9,9 @@
  */
 import { schemaChecksum, type IndexedDbDatabase } from './indexeddb-adapter.ts';
 import { AppError } from '../../errors.ts';
-import { PORTABLE_SCHEMA } from '../../schema/v1/portable-schema.ts';
+import { PORTABLE_SCHEMA as BASELINE_SCHEMA } from '../../schema/v1/portable-schema.ts';
+import { PORTABLE_SCHEMA } from '../../schema/current.ts';
+import { CASE_SYSTEM_IDB_MIGRATION } from './case-system-migration.ts';
 import type { PortableTransaction } from '../../portable/store.ts';
 import { toCanonicalTimestamp } from '../../util/dates.ts';
 
@@ -23,6 +25,7 @@ export interface IdbMigration {
   readonly version: number;
   readonly name: string;
   readonly description: string;
+  readonly checksum?: string;
   up(context: IdbMigrationContext): Promise<void>;
 }
 
@@ -41,11 +44,17 @@ export class IdbMigrationManager {
 
   constructor(
     db: IndexedDbDatabase,
-    options: { migrations?: readonly IdbMigration[]; appVersion?: string; clock?: () => Date } = {},
+    options: {
+      migrations?: readonly IdbMigration[];
+      appVersion?: string;
+      clock?: () => Date;
+    } = {},
   ) {
     this.db = db;
-    this.migrations = [...(options.migrations ?? [])].sort((left, right) => left.version - right.version);
-    this.appVersion = options.appVersion ?? '0.1.0';
+    this.migrations = [
+      ...(options.migrations ?? [CASE_SYSTEM_IDB_MIGRATION]),
+    ].sort((left, right) => left.version - right.version);
+    this.appVersion = options.appVersion ?? '0.3.0';
     this.clock = options.clock ?? (() => new Date());
   }
 
@@ -70,7 +79,10 @@ export class IdbMigrationManager {
    * Safe to call repeatedly: the checksum is verified, not overwritten.
    */
   async ensureBaseline(): Promise<MigrationRecord> {
-    const existing = await this.db.get('schema_migration', 1 as unknown as string);
+    const existing = await this.db.get(
+      'schema_migration',
+      1 as unknown as string,
+    );
     if (existing) {
       this.assertChecksum(existing);
       return {
@@ -82,7 +94,7 @@ export class IdbMigrationManager {
     }
     const meta = await this.db.readMeta();
     const appliedAt = meta.created_at ?? this.now();
-    const checksum = schemaChecksum(PORTABLE_SCHEMA);
+    const checksum = schemaChecksum(BASELINE_SCHEMA);
     await this.db.transaction(['schema_migration'], async (tx) => {
       await tx.put('schema_migration', {
         version: 1,
@@ -95,15 +107,38 @@ export class IdbMigrationManager {
         backup_path: null,
       });
     });
-    return { version: 1, name: '0001_initial', checksum, applied_at: appliedAt };
+    return {
+      version: 1,
+      name: '0001_initial',
+      checksum,
+      applied_at: appliedAt,
+    };
   }
 
   /** Applies pending data migrations in version order. */
   async migrate(): Promise<{ applied: MigrationRecord[]; pending: number }> {
     await this.ensureBaseline();
     const current = await this.applied();
-    const currentVersion = current.reduce((max, record) => Math.max(max, record.version), 0);
-    const pending = this.migrations.filter((migration) => migration.version > currentVersion);
+    for (const record of current) {
+      const known = this.migrations.find((m) => m.version === record.version);
+      if (known && record.checksum !== migrationChecksum(known))
+        throw new AppError(
+          'MIGRATION_CHECKSUM_MISMATCH',
+          `migration ${record.version} checksum mismatch`,
+        );
+      if (record.version > PORTABLE_SCHEMA.schemaVersion)
+        throw new AppError(
+          'SCHEMA_TOO_NEW',
+          'database is newer than this application',
+        );
+    }
+    const currentVersion = current.reduce(
+      (max, record) => Math.max(max, record.version),
+      0,
+    );
+    const pending = this.migrations.filter(
+      (migration) => migration.version > currentVersion,
+    );
     const applied: MigrationRecord[] = [];
     for (const migration of pending) {
       const started = Date.now();
@@ -111,7 +146,11 @@ export class IdbMigrationManager {
       await this.db.transaction(
         [...PORTABLE_SCHEMA.tables.map((table) => table.name)],
         async (tx) => {
-          await migration.up({ tx, now: this.now(), appVersion: this.appVersion });
+          await migration.up({
+            tx,
+            now: this.now(),
+            appVersion: this.appVersion,
+          });
           await tx.put('schema_migration', {
             version: migration.version,
             name: migration.name,
@@ -134,28 +173,41 @@ export class IdbMigrationManager {
     return { applied, pending: pending.length };
   }
 
-  async verify(): Promise<{ valid: boolean; errors: string[]; currentVersion: number }> {
+  async verify(): Promise<{
+    valid: boolean;
+    errors: string[];
+    currentVersion: number;
+  }> {
     const errors: string[] = [];
     const records = await this.applied();
     if (records.length === 0) errors.push('no migration records');
     for (const record of records) {
       if (record.version === 1) {
-        const expected = schemaChecksum(PORTABLE_SCHEMA);
+        const expected = schemaChecksum(BASELINE_SCHEMA);
         if (record.checksum !== expected) {
-          errors.push(`baseline checksum ${record.checksum} does not match schema ${expected}`);
+          errors.push(
+            `baseline checksum ${record.checksum} does not match schema ${expected}`,
+          );
         }
       }
     }
     const expectedVersions = new Set(records.map((record) => record.version));
     for (const migration of this.migrations) {
-      if (!expectedVersions.has(migration.version)) errors.push(`migration ${migration.version} not applied`);
+      const applied = records.find((r) => r.version === migration.version);
+      if (applied && applied.checksum !== migrationChecksum(migration))
+        errors.push(`migration ${migration.version} checksum mismatch`);
+      if (!expectedVersions.has(migration.version))
+        errors.push(`migration ${migration.version} not applied`);
     }
-    const currentVersion = records.reduce((max, record) => Math.max(max, record.version), 0);
+    const currentVersion = records.reduce(
+      (max, record) => Math.max(max, record.version),
+      0,
+    );
     return { valid: errors.length === 0, errors, currentVersion };
   }
 
   private assertChecksum(row: Record<string, string | number | null>): void {
-    const expected = schemaChecksum(PORTABLE_SCHEMA);
+    const expected = schemaChecksum(BASELINE_SCHEMA);
     if (String(row.checksum) !== expected) {
       throw new AppError(
         'MIGRATION_CHECKSUM_MISMATCH',
@@ -166,6 +218,7 @@ export class IdbMigrationManager {
 }
 
 function migrationChecksum(migration: IdbMigration): string {
+  if (migration.checksum) return migration.checksum;
   const text = `${migration.version}|${migration.name}|${migration.description}|${migration.up.toString()}`;
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index += 1) {

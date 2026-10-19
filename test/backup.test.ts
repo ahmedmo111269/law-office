@@ -1,9 +1,21 @@
 import assert from 'node:assert/strict';
-import { copyFileSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import test from 'node:test';
 import { LawOfficeDatabase } from '../src/app/law-office-database.ts';
 import { SqliteDatabase } from '../src/db/sqlite/sqlite-adapter.ts';
-import { makeCase, makeClient, makeCourt, makeFile, openHarness } from './helpers.ts';
+import {
+  makeCase,
+  makeClient,
+  makeCourt,
+  makeFile,
+  openHarness,
+} from './helpers.ts';
 
 test('15. backup export is a verified, consistent snapshot and detects tampering', () => {
   const h = openHarness('backup');
@@ -15,7 +27,9 @@ test('15. backup export is a verified, consistent snapshot and detects tampering
     const backup = h.db.backups.create({ label: 'test' });
     assert.equal(existsSync(backup.path), true);
     assert.equal(existsSync(backup.checksumPath), true);
-    const verification = h.db.backups.verify(backup.path, { requireChecksumSidecar: true });
+    const verification = h.db.backups.verify(backup.path, {
+      requireChecksumSidecar: true,
+    });
     assert.equal(verification.valid, true, verification.errors.join('; '));
     assert.equal(verification.checksumSidecarVerified, true);
     assert.equal(verification.attachmentsIncluded, false);
@@ -23,8 +37,15 @@ test('15. backup export is a verified, consistent snapshot and detects tampering
 
     const snapshot = SqliteDatabase.open({ path: backup.path, readOnly: true });
     try {
-      assert.equal(snapshot.get<{ c: number }>('SELECT COUNT(*) AS c FROM party')?.c, 1);
-      assert.equal(snapshot.get<{ user_version: number }>('PRAGMA user_version')?.user_version, 1);
+      assert.equal(
+        snapshot.get<{ c: number }>('SELECT COUNT(*) AS c FROM party')?.c,
+        1,
+      );
+      assert.equal(
+        snapshot.get<{ user_version: number }>('PRAGMA user_version')
+          ?.user_version,
+        2,
+      );
     } finally {
       snapshot.close();
     }
@@ -32,8 +53,13 @@ test('15. backup export is a verified, consistent snapshot and detects tampering
     const tampered = `${backup.path}.tampered`;
     copyFileSync(backup.path, tampered);
     copyFileSync(backup.checksumPath, `${tampered}.sha256`);
-    writeFileSync(tampered, Buffer.concat([readFileSync(tampered), Buffer.from('x')]));
-    const tamperedResult = h.db.backups.verify(tampered, { requireChecksumSidecar: true });
+    writeFileSync(
+      tampered,
+      Buffer.concat([readFileSync(tampered), Buffer.from('x')]),
+    );
+    const tamperedResult = h.db.backups.verify(tampered, {
+      requireChecksumSidecar: true,
+    });
     assert.equal(tamperedResult.valid, false);
     assert.ok(tamperedResult.errors.some((error) => /checksum/i.test(error)));
     rmSync(tampered, { force: true });
@@ -79,11 +105,15 @@ test('16. restore creates a working database with intact relations and warns abo
     assert.match(result.warning, /external/i);
     assert.throws(
       () => h.db.backups.restoreToNewDatabase(backup.path, restoredPath),
-      (error: unknown) => (error as { code?: string }).code === 'RESTORE_REQUIRES_EMPTY_DATABASE',
+      (error: unknown) =>
+        (error as { code?: string }).code === 'RESTORE_REQUIRES_EMPTY_DATABASE',
     );
     h.db.close();
 
-    const restored = LawOfficeDatabase.open({ path: restoredPath, appVersion: '0.1.0-test' }).database;
+    const restored = LawOfficeDatabase.open({
+      path: restoredPath,
+      appVersion: '0.1.0-test',
+    }).database;
     try {
       const party = restored.parties.getFull(client.party.id);
       assert.equal(party?.client?.client_code, client.client?.client_code);

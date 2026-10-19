@@ -1,10 +1,33 @@
 import type { EngineRow } from '../../portable/store.ts';
+import {
+  addTerm,
+  getIntake,
+  mergeTerms,
+  saveIntake,
+  saveStage,
+  saveTemplate,
+  templateFor,
+} from '../../cases/intake-operations.ts';
+import type {
+  CaseTemplate,
+  IntakeInput,
+  StageInput,
+} from '../../cases/types.ts';
+import { normalizeArabic } from '../../util/arabic.ts';
+import type { QueryFilter } from '../../portable/query.ts';
 import { ValidationError } from '../../errors.ts';
 import type { ServiceDeps, TableRequest, TableResult } from './types.ts';
-import { paginate } from './types.ts';
+import { scopedPartyLinks } from '../../cases/party-scope.ts';
+import { paginate, relatedRows, eachPage } from './types.ts';
 import type { HearingSummary, JudgmentSummary } from './files.ts';
 
 export interface CaseRow {
+  isIntake?: boolean;
+  fileId?: string;
+  fileNumber?: string;
+  stageName?: string;
+  followUpOn?: string | null;
+  lastActionOn?: string | null;
   legalCase: EngineRow;
   courtName: string;
   circuitName: string;
@@ -33,17 +56,37 @@ export interface CaseDetail {
   statusName: string;
   degreeName: string;
   files: EngineRow[];
-  parties: Array<{ party: EngineRow; roleName: string; roleCode: string; sideName: string; fileId: string; linkId: string }>;
+  parties: Array<{
+    party: EngineRow;
+    roleName: string;
+    roleCode: string;
+    sideName: string;
+    sideCode: string;
+    fileId: string;
+    linkId: string;
+    inherited: boolean;
+    isOfficeClient: boolean;
+  }>;
   hearings: HearingSummary[];
   judgments: JudgmentSummary[];
   tasks: EngineRow[];
   documents: EngineRow[];
   activity: EngineRow[];
   relatedLinks: EngineRow[];
-  relatedCases: Array<{ link: EngineRow; legalCase: EngineRow | null; relationName: string; direction: 'outgoing' | 'incoming' }>;
+  relatedCases: Array<{
+    link: EngineRow;
+    legalCase: EngineRow | null;
+    relationName: string;
+    direction: 'outgoing' | 'incoming';
+  }>;
   announcements: EngineRow[];
   notes: EngineRow[];
-  alerts: Array<{ kind: 'warning' | 'danger' | 'info'; title: string; description: string; action?: string }>;
+  alerts: Array<{
+    kind: 'warning' | 'danger' | 'info';
+    title: string;
+    description: string;
+    action?: string;
+  }>;
   outstandingMinor: number | null;
 }
 
@@ -55,178 +98,484 @@ export class CaseService {
   }
 
   async list(request: TableRequest): Promise<TableResult<CaseRow>> {
-    const { db, lookups } = this.deps;
-    const statusId = request.filters.status ? lookups.id('case_status', request.filters.status) : null;
-    const typeId = request.filters.type ? lookups.id('case_type', request.filters.type) : null;
-    const degreeId = request.filters.degree ? lookups.id('litigation_degree', request.filters.degree) : null;
-    const courtFilter = request.filters.court || null;
-    const yearFilter = request.filters.year ? Number(request.filters.year) : null;
-    const archivedFilter = request.filters.archived || null; // values: 'archived' | 'active' | '' 
-    const missingFilter = request.filters.missing || null; // 'true'
-    const hasNextFilter = request.filters.hasNext || null; // 'yes' | 'no'
-    const fileFilter = request.filters.file || null;
-    const searchRaw = request.search.trim();
-
-    // Fast path: file filter direct
-    let candidateCaseIdsForFile: Set<string> | null = null;
-    if (fileFilter) {
-      const links = await db.query('case_file_case', { filters: [{ column: 'file_id', op: 'eq', value: fileFilter }], limit: 2000 });
-      candidateCaseIdsForFile = new Set(links.rows.map((r) => String(r.case_id)));
-      if (candidateCaseIdsForFile.size === 0) return { rows: [], total: 0 };
-    }
-
-    // If search present, use hybrid search to get candidates
-    if (searchRaw) {
-      const candidateIds = await this.searchCandidateIds(searchRaw);
-      // Also include direct contains matches already in searchCandidateIds, so we have union
-      const allIds = [...candidateIds];
-      // Filter by other criteria in memory after enrichment?
-      // For search we need to respect filters, so we will fetch cases for those ids, filter, then sort & paginate.
-      let cases: EngineRow[] = [];
-      for (const id of allIds) {
-        // Check file filter
-        if (candidateCaseIdsForFile && !candidateCaseIdsForFile.has(id)) continue;
-        const legalCase = await db.get('legal_case', id);
-        if (!legalCase) continue;
-        if (statusId && String(legalCase.status_id) !== statusId) continue;
-        if (typeId && String(legalCase.case_type_id) !== typeId) continue;
-        if (degreeId && String(legalCase.litigation_degree_id) !== degreeId) continue;
-        if (courtFilter && String(legalCase.court_id ?? '') !== courtFilter) continue;
-        if (yearFilter !== null && Number(legalCase.case_year) !== yearFilter) continue;
-        if (archivedFilter === 'archived' && !legalCase.archived_at) continue;
-        if (archivedFilter === 'active' && legalCase.archived_at) continue;
-        // missing and hasNext will be handled after enrichment because needs joins
-        cases.push(legalCase);
+    const { db, lookups, cache } = this.deps;
+    const f = request.filters;
+    const filters: QueryFilter[] = [
+      {
+        column: 'case_scope',
+        op: 'in',
+        value: f.scope ? [f.scope] : ['case', 'intake'],
+      },
+    ];
+    const references: Record<string, [string, string]> = {
+      status: ['status_id', 'case_status'],
+      type: ['case_type_id', 'case_type'],
+      degree: ['degree_id', 'litigation_degree'],
+      stage: ['stage_type_id', 'stage_type'],
+      stageStatus: ['stage_status_id', 'stage_status'],
+      priority: ['priority_id', 'priority'],
+    };
+    for (const [key, [column, list]] of Object.entries(references))
+      if (f[key]) {
+        const id = lookups.id(list, f[key]);
+        if (!id) return { rows: [], total: 0 };
+        filters.push({ column, op: 'eq', value: id });
       }
-
-      // If search was numeric case_number pattern but FTS didn't yield, try direct LIKE scans and merge
-      if (cases.length === 0) {
-        // Direct scans for case_number / subject / court name
-        const direct = await this.directSearchFallback(searchRaw);
-        for (const legalCase of direct) {
-          if (candidateIds.has(String(legalCase.id))) continue;
-          if (candidateCaseIdsForFile && !candidateCaseIdsForFile.has(String(legalCase.id))) continue;
-          if (statusId && String(legalCase.status_id) !== statusId) continue;
-          if (typeId && String(legalCase.case_type_id) !== typeId) continue;
-          if (degreeId && String(legalCase.litigation_degree_id) !== degreeId) continue;
-          if (courtFilter && String(legalCase.court_id ?? '') !== courtFilter) continue;
-          if (yearFilter !== null && Number(legalCase.case_year) !== yearFilter) continue;
-          if (archivedFilter === 'archived' && !legalCase.archived_at) continue;
-          if (archivedFilter === 'active' && legalCase.archived_at) continue;
-          cases.push(legalCase);
-        }
-      }
-
-      // Handle hasNext and missing post-filter after enrichment? but we can pre-filter missing via field checks
-      if (missingFilter === 'true') {
-        cases = cases.filter((c) => this.missingReasons(c).length > 0);
-      }
-      // hasNext needs hearing check; we will handle after enrichment pooling to avoid per-case N+1 extra filtering? Do post-filter via batch
-      if (hasNextFilter === 'yes' || hasNextFilter === 'no') {
-        const wantHasNext = hasNextFilter === 'yes';
-        const hearingMap = await this.batchHasNext(new Set(cases.map((c) => String(c.id))));
-        cases = cases.filter((c) => (hearingMap.get(String(c.id)) ?? false) === wantHasNext);
-      }
-
-      cases.sort((a, b) => compareCases(a, b, request.sortKey, request.sortDir));
-      const { offset: pageOffset, limit } = paginate(request.page, request.pageSize);
-      return { rows: await this.enrich(cases.slice(pageOffset, pageOffset + limit)), total: cases.length };
-    }
-
-    // No search: build DB filters for simple fields
-    const filters: Array<{ column: string; op: 'eq' | 'in' | 'isNull' | 'notNull' | 'gte' | 'lte'; value?: string | number | readonly (string | number)[] }> = [];
-    if (statusId) filters.push({ column: 'status_id', op: 'eq', value: statusId });
-    if (typeId) filters.push({ column: 'case_type_id', op: 'eq', value: typeId });
-    if (degreeId) filters.push({ column: 'litigation_degree_id', op: 'eq', value: degreeId });
-    if (courtFilter) filters.push({ column: 'court_id', op: 'eq', value: courtFilter });
-    if (yearFilter !== null && !Number.isNaN(yearFilter)) filters.push({ column: 'case_year', op: 'eq', value: yearFilter });
-    if (archivedFilter === 'archived') filters.push({ column: 'archived_at', op: 'notNull' });
-    if (archivedFilter === 'active') filters.push({ column: 'archived_at', op: 'isNull' });
-    if (candidateCaseIdsForFile) {
-      filters.push({ column: 'id', op: 'in', value: [...candidateCaseIdsForFile] });
-      if (candidateCaseIdsForFile.size === 0) return { rows: [], total: 0 };
-    }
-    if (missingFilter === 'true') {
-      // missing includes court_id IS NULL ; we'll post-filter because OR logic not supported in query builder directly
-      // So we'll fetch all matching then filter
-    }
-
-    // Handle hasNext filter via hearing set
-    let hasNextIds: Set<string> | null = null;
-    if (hasNextFilter === 'yes' || hasNextFilter === 'no') {
-      hasNextIds = await this.nextHearingCaseIds();
-    }
-
-    // Determine sort column: map UI keys to DB columns
-    let sortColumn = 'registration_date';
-    const sortDir = request.sortDir ?? 'desc';
-    if (request.sortKey === 'case_number') sortColumn = 'case_number';
-    else if (request.sortKey === 'case_year') sortColumn = 'case_year';
-    else if (request.sortKey === 'registration_date') sortColumn = 'registration_date';
-    else if (request.sortKey === 'updated_at') sortColumn = 'updated_at';
-    else if (request.sortKey === 'subject') sortColumn = 'case_year'; // subject not sorted in DB, fallback
-
-    // If hasNext or missing filter, we need to fetch all then filter & paginate manually
-    const needsPostFilter = missingFilter === 'true' || hasNextFilter === 'yes' || hasNextFilter === 'no';
-    if (needsPostFilter) {
-      // fetch all matching legal_case (maybe up to limit 5000 to protect)
-      const all = await db.query('legal_case', {
-        filters: filters as never,
-        orderBy: [{ column: sortColumn, direction: sortDir }],
-        limit: 5000,
+    for (const [key, column] of Object.entries({
+      court: 'court_id',
+      circuit: 'circuit_id',
+      subtype: 'subtype_id',
+      nature: 'nature_id',
+      file: 'file_id',
+      responsible: 'responsible_party_id',
+    }))
+      if (f[key]) filters.push({ column, op: 'eq', value: f[key]! });
+    if (f.year)
+      filters.push({ column: 'case_year', op: 'eq', value: Number(f.year) });
+    if (f.archived)
+      filters.push({
+        column: 'archived_at',
+        op: f.archived === 'archived' ? 'notNull' : 'isNull',
       });
-      let rows = all.rows;
-      if (missingFilter === 'true') {
-        rows = rows.filter((r) => this.missingReasons(r as EngineRow).length > 0);
+    if (f.missing === 'true')
+      filters.push({ column: 'missing_count', op: 'gt', value: 0 });
+    if (f.hasNext)
+      filters.push({
+        column: 'latest_hearing_at',
+        op: f.hasNext === 'yes' ? 'gte' : 'lteOrNull',
+        value: db.now(),
+      });
+    for (const [key, column] of Object.entries({
+      hasPre: 'has_pre_stage',
+      hasRelated: 'has_related',
+      hasAppeal: 'has_appeal',
+      hasDocuments: 'has_documents',
+      needsNext: 'needs_next',
+      hasHearing: 'has_hearing',
+    }))
+      if (f[key])
+        filters.push({ column, op: 'eq', value: f[key] === 'yes' ? 1 : 0 });
+    const dateColumn =
+      (
+        {
+          registration: 'registered_on',
+          judgment: 'judgment_on',
+          last: 'last_action_on',
+          followUp: 'follow_up_on',
+        } as Record<string, string>
+      )[f.dateField ?? 'registration'] ?? 'registered_on';
+    if (f.fromDate)
+      filters.push({ column: dateColumn, op: 'gte', value: f.fromDate });
+    if (f.toDate)
+      filters.push({ column: dateColumn, op: 'lte', value: f.toDate });
+    if (f.staleBefore)
+      filters.push({
+        column: 'last_action_on',
+        op: 'lteOrNull',
+        value: f.staleBefore,
+      });
+    // Indexed relation reads are paged and retain identifiers only, never full party/stage tables.
+    const relationFilter = async (
+      entity: string,
+      relationFilters: QueryFilter[],
+      partyOverride = false,
+    ): Promise<void> => {
+      const ids = new Set<string>();
+      const globals = new Map<string, Set<string>>();
+      await eachPage(
+        db,
+        entity,
+        (rows) => {
+          for (const row of rows) {
+            if (row.case_id) ids.add(String(row.case_id));
+            else {
+              const fileId = String(row.file_id);
+              ids.add(fileId);
+              const parties = globals.get(fileId) ?? new Set<string>();
+              parties.add(partyOverride ? String(row.party_id) : '*');
+              globals.set(fileId, parties);
+            }
+          }
+        },
+        { filters: relationFilters },
+      );
+      const fileIds = [...globals.keys()];
+      // SQLite benefits from small indexed IN batches. IDB instead streams a
+      // large membership Set once; 50×500 individual seeks are much slower.
+      const width =
+        db.store.engine === 'indexeddb' ? Math.max(1, fileIds.length) : 500;
+      for (let start = 0; start < fileIds.length; start += width) {
+        const fileFilter: QueryFilter[] = [
+          {
+            column: 'file_id',
+            op: 'in',
+            value: fileIds.slice(start, start + width),
+          },
+        ];
+        const keys = new Set<string>();
+        if (partyOverride)
+          await eachPage(
+            db,
+            'case_file_party',
+            (rows) => {
+              for (const p of rows)
+                keys.add(
+                  `${String(p.file_id)}:${String(p.party_id)}:${String(p.case_id)}`,
+                );
+            },
+            { filters: [...fileFilter, { column: 'case_id', op: 'notNull' }] },
+          );
+        await eachPage(
+          db,
+          'case_file_case',
+          (rows) => {
+            for (const link of rows) {
+              const parties = globals.get(String(link.file_id))!;
+              if (
+                !partyOverride ||
+                [...parties].some(
+                  (id) =>
+                    !keys.has(
+                      `${String(link.file_id)}:${id}:${String(link.case_id)}`,
+                    ),
+                )
+              )
+                ids.add(String(link.case_id));
+            }
+          },
+          { filters: fileFilter },
+        );
       }
-      if (hasNextIds !== null) {
-        const want = hasNextFilter === 'yes';
-        rows = rows.filter((r) => (hasNextIds!.has(String((r as EngineRow).id)) ? true : false) === want);
-      }
-      // If sort was not DB column (e.g., court), resort via enrich sort
-      if (!['case_number', 'case_year', 'registration_date', 'updated_at'].includes(request.sortKey ?? '')) {
-        rows.sort((a, b) => compareCases(a as EngineRow, b as EngineRow, request.sortKey, request.sortDir));
-      }
-      const { offset, limit } = paginate(request.page, request.pageSize);
-      const pageRows = rows.slice(offset, offset + limit);
-      return { rows: await this.enrich(pageRows as EngineRow[]), total: rows.length };
+      filters.push({ column: 'entity_id', op: 'in', value: [...ids] });
+    };
+    if (f.previousType) {
+      const id = lookups.id('stage_type', f.previousType);
+      if (!id) return { rows: [], total: 0 };
+      await relationFilter('procedural_stage', [
+        { column: 'type_id', op: 'eq', value: id },
+      ]);
     }
-
-    const page = await db.query('legal_case', {
-      filters: filters as never,
-      orderBy: [{ column: sortColumn, direction: sortDir }],
+    if (f.term) {
+      const ids = new Set([f.term]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const term of lookups.allItems('legal_subject'))
+          if (term.parentId && ids.has(term.parentId) && !ids.has(term.id)) {
+            ids.add(term.id);
+            changed = true;
+          }
+      }
+      await relationFilter('case_term', [
+        { column: 'term_id', op: 'in', value: [...ids] },
+      ]);
+    }
+    if (f.party || f.role) {
+      const rf: QueryFilter[] = [];
+      if (f.party) rf.push({ column: 'party_id', op: 'eq', value: f.party });
+      if (f.role)
+        rf.push({
+          column: 'role_id',
+          op: 'eq',
+          value: lookups.id('party_role', f.role) ?? '',
+        });
+      await relationFilter('case_file_party', rf, true);
+    }
+    for (const token of [
+      ...new Set(normalizeArabic(request.search).split(/\s+/).filter(Boolean)),
+    ])
+      filters.push({ column: 'normalized_text', op: 'contains', value: token });
+    const sortMap: Record<string, string> = {
+      case: 'case_number',
+      case_number: 'case_number',
+      case_year: 'case_year',
+      registration: 'registered_on',
+      registration_date: 'registered_on',
+      updated: 'updated_at',
+      updated_at: 'updated_at',
+      subject: 'title',
+      next: 'latest_hearing_at',
+      lastAction: 'last_action_on',
+      followUp: 'follow_up_on',
+    };
+    const page = await db.queryCaseIndex({
+      filters,
+      orderBy: [
+        {
+          column: sortMap[request.sortKey ?? ''] ?? 'updated_at',
+          direction: request.sortDir ?? 'desc',
+        },
+      ],
       ...paginate(request.page, request.pageSize),
     });
-    // Handle missing filter false case already; if missing filter was true we handled above, so here we just enrich
-    // For sorting by court or other non-DB columns, need post-sort but we already used DB sort; if user sorted by court, resort after enrich then return correct pagination? But we already paginated before enrichment, so resorting after would break pagination.
-    // To handle court sort correctly, we fetch more when sortKey is court-like: fallback to in-memory sort for that page only is okay though total order may be off. Accept for now.
-    if (request.sortKey === 'court' || request.sortKey === 'degree' || request.sortKey === 'status') {
-      // enrich then sort slice (not ideal but better than nothing)
-      let enriched = await this.enrich(page.rows as EngineRow[]);
-      enriched.sort((a, b) => {
-        if (request.sortKey === 'court') return a.courtName.localeCompare(b.courtName, 'ar') * (sortDir === 'asc' ? 1 : -1);
-        if (request.sortKey === 'degree') return a.degreeName.localeCompare(b.degreeName, 'ar') * (sortDir === 'asc' ? 1 : -1);
-        if (request.sortKey === 'status') return a.statusName.localeCompare(b.statusName, 'ar') * (sortDir === 'asc' ? 1 : -1);
-        return 0;
-      });
-      return { rows: enriched, total: page.total };
+    const judicial = page.rows.filter((r) => r.case_scope === 'case');
+    const intake = page.rows.filter((r) => r.case_scope === 'intake');
+    const cases = await cache.many(
+      'legal_case',
+      judicial.map((r) => String(r.entity_id)),
+    );
+    const files = await cache.many(
+      'case_file',
+      intake.map((r) => String(r.entity_id)),
+    );
+    const enriched = await this.enrich([...cases.values()]);
+    const byId = new Map(
+      enriched.map((row) => [String(row.legalCase.id), row]),
+    );
+    const intakeLinks = intake.length
+      ? (
+          await relatedRows(db, 'case_file_party', {
+            filters: [
+              {
+                column: 'file_id',
+                op: 'in',
+                value: intake.map((r) => String(r.entity_id)),
+              },
+              { column: 'case_id', op: 'isNull' },
+            ],
+          })
+        ).rows
+      : [];
+    const intakeParties = await cache.many(
+      'party',
+      intakeLinks.map((l) => String(l.party_id)),
+    );
+    const intakeNames = (id: string, client: boolean): string[] => [
+      ...new Set(
+        intakeLinks
+          .filter(
+            (l) => l.file_id === id && (l.is_office_client === 1) === client,
+          )
+          .map((l) =>
+            String(intakeParties.get(String(l.party_id))?.display_name ?? ''),
+          )
+          .filter(Boolean),
+      ),
+    ];
+    const rows: CaseRow[] = [];
+    for (const index of page.rows) {
+      const id = String(index.entity_id);
+      let row = byId.get(id);
+      if (index.case_scope === 'intake') {
+        const file = files.get(id);
+        if (!file) continue;
+        row = {
+          isIntake: true,
+          legalCase: {
+            ...file,
+            case_number: 'لم تُقيد',
+            case_year: null,
+            case_type_id: file.case_type_id ?? null,
+            subject: file.subject ?? file.title ?? null,
+          },
+          courtName: String(file.title),
+          circuitName: 'ملف نزاع قبل القيد',
+          caseTypeName: lookups.name(
+            'case_type',
+            String(file.case_type_id ?? ''),
+          ),
+          degreeName: 'قبل القيد',
+          statusName: 'ملف نزاع',
+          clientNames: intakeNames(id, true),
+          opponentNames: intakeNames(id, false),
+          hearingsCount: 0,
+          nextHearingAt: null,
+          lastHearingAt: null,
+          hasJudgment: false,
+          filesCount: 1,
+          tasksCount: 0,
+          isArchived: !!file.archived_at,
+          hasMissingData: Number(index.missing_count) > 0,
+          missingReasons: [],
+          lastActivityAt: String(file.updated_at),
+        };
+      }
+      if (!row) continue;
+      row.fileId = String(index.file_id ?? '');
+      if (row.isIntake)
+        row.fileNumber = String(row.legalCase.file_number ?? '');
+      row.stageName = lookups.name(
+        'stage_type',
+        String(index.stage_type_id ?? ''),
+      );
+      row.followUpOn = index.follow_up_on ? String(index.follow_up_on) : null;
+      row.lastActionOn = index.last_action_on
+        ? String(index.last_action_on)
+        : null;
+      row.hasMissingData = Number(index.missing_count) > 0;
+      row.missingReasons = row.hasMissingData
+        ? [
+            `${String(index.missing_count)} بند يحتاج استكمالًا — افتح الملف لعرض القائمة`,
+          ]
+        : [];
+      rows.push(row);
     }
-    return { rows: await this.enrich(page.rows as EngineRow[]), total: page.total };
+    return { rows, total: page.total };
+  }
+
+  async indexStats(): Promise<{
+    total: number;
+    open: number;
+    next: number;
+    missing: number;
+    archived: number;
+  }> {
+    const db = this.deps.db;
+    const base: QueryFilter[] = [
+      { column: 'case_scope', op: 'in', value: ['case', 'intake'] },
+    ];
+    if (db.store.engine === 'indexeddb') {
+      const result = { total: 0, archived: 0, open: 0, next: 0, missing: 0 },
+        now = db.now();
+      for await (const rows of db.store.scan('search_document', {
+        filters: base,
+      })) {
+        for (const row of rows) {
+          result.total += 1;
+          if (row.archived_at !== null && row.archived_at !== undefined)
+            result.archived += 1;
+          if (
+            typeof row.latest_hearing_at === 'string' &&
+            row.latest_hearing_at >= now
+          )
+            result.next += 1;
+          if (Number(row.missing_count) > 0) result.missing += 1;
+        }
+      }
+      result.open = result.total - result.archived;
+      return result;
+    }
+    const count = async (filters: QueryFilter[]): Promise<number> =>
+      (await db.queryCaseIndex({ filters: [...base, ...filters], limit: 0 }))
+        .total;
+    const total = await count([]),
+      archived = await count([{ column: 'archived_at', op: 'notNull' }]);
+    return {
+      total,
+      archived,
+      open: total - archived,
+      next: await count([
+        { column: 'latest_hearing_at', op: 'gte', value: db.now() },
+      ]),
+      missing: await count([{ column: 'missing_count', op: 'gt', value: 0 }]),
+    };
+  }
+  async intake(fileId: string) {
+    return getIntake(this.deps, fileId);
+  }
+  async saveIntake(input: IntakeInput) {
+    const result = await saveIntake(this.deps, input);
+    if (input.keywords?.length) await this.deps.lookups.refresh(this.deps.db);
+    return result;
+  }
+  async saveStage(input: StageInput) {
+    return saveStage(this.deps, input);
+  }
+  async template(type: string, file?: EngineRow) {
+    return templateFor(this.deps, type, file);
+  }
+  async saveTemplate(template: CaseTemplate) {
+    return saveTemplate(this.deps, template);
+  }
+  async addTerm(input: Parameters<typeof addTerm>[1]) {
+    return addTerm(this.deps, input);
+  }
+  async mergeTerms(sourceId: string, targetId: string) {
+    return mergeTerms(this.deps, sourceId, targetId);
+  }
+  async createCaseFromStage(
+    stageId: string,
+    input: Omit<IntakeInput, 'fileId' | 'sourceStageId'>,
+  ) {
+    const stage = await this.deps.db.require('procedural_stage', stageId);
+    if (!input.caseNumber?.trim())
+      throw new ValidationError('رقم الدعوى القضائية مطلوب لهذه العملية', {
+        field: 'caseNumber',
+        messageAr: 'أدخل رقم الدعوى المقيدة، أو احتفظ بالملف قبل القيد.',
+      });
+    return this.saveIntake({
+      ...input,
+      fileId: String(stage.file_id),
+      sourceStageId: stageId,
+    });
+  }
+  async createRelatedCase(
+    originalCaseId: string,
+    input: IntakeInput,
+    relationCode: string,
+    judgmentId?: string,
+  ) {
+    return this.deps.db.transaction(async () => {
+      await this.deps.db.require('legal_case', originalCaseId);
+      const saved = await this.saveIntake({
+        ...input,
+        relatedCaseId: originalCaseId,
+        relationCode,
+      });
+      if (!saved.legalCase)
+        throw new ValidationError('الدرجة الجديدة تحتاج رقمًا وسنة مستقلين', {
+          field: 'caseNumber',
+          messageAr: 'أدخل رقم الدرجة الجديدة وسنتها.',
+        });
+      if (judgmentId) {
+        const judgment = await this.deps.db.require('judgment', judgmentId);
+        if (judgment.case_id !== originalCaseId)
+          throw new ValidationError('الحكم لا يتبع القضية الأصلية');
+        const code =
+          relationCode === 'cassation_of'
+            ? 'cassation'
+            : relationCode === 'opposition_of'
+              ? 'opposition'
+              : relationCode === 'retrial_of'
+                ? 'retrial'
+                : relationCode === 'appeal_of'
+                  ? 'appeal'
+                  : 'other';
+        await this.deps.db.insert('judgment_appeal', {
+          judgment_id: judgmentId,
+          appeal_type_id: this.deps.lookups.id('appeal_type', code),
+          filed_on: input.registrationDate || null,
+          user_deadline_on: null,
+          status_id: null,
+          reference_no: input.caseNumber || null,
+          notes: 'تسجيل يدوي من الأوراق، بلا حساب موعد',
+          appeal_case_id: saved.legalCase.id,
+          authority_id: input.courtId || null,
+        });
+      }
+      return saved;
+    });
   }
 
   private async enrich(cases: readonly EngineRow[]): Promise<CaseRow[]> {
     const { db, lookups, cache } = this.deps;
-    const now = new Date().toISOString();
+    const now = db.now();
     const rows: CaseRow[] = [];
     // Batch fetch courts, circuits, hearings aggregates to reduce N+1 where possible
-    const courtIds = [...new Set(cases.map((c) => c.court_id ? String(c.court_id) : null).filter(Boolean as never))] as string[];
-    const circuitIds = [...new Set(cases.map((c) => c.circuit_id ? String(c.circuit_id) : null).filter(Boolean as never))] as string[];
+    const courtIds = [
+      ...new Set(
+        cases
+          .map((c) => (c.court_id ? String(c.court_id) : null))
+          .filter(Boolean as never),
+      ),
+    ] as string[];
+    const circuitIds = [
+      ...new Set(
+        cases
+          .map((c) => (c.circuit_id ? String(c.circuit_id) : null))
+          .filter(Boolean as never),
+      ),
+    ] as string[];
     const courts = await cache.many('court', courtIds);
     const circuits = await cache.many('court_circuit', circuitIds);
     // Batch hearings for all cases (up to 25 cases)
     const caseIds = cases.map((c) => String(c.id));
     const hearingsByCase = new Map<string, EngineRow[]>();
-    const hearingsPage = await db.query('hearing', { filters: [{ column: 'case_id', op: 'in', value: caseIds }], limit: 2000, orderBy: [{ column: 'scheduled_at', direction: 'asc' }] });
+    const hearingsPage = await relatedRows(db, 'hearing', {
+      filters: [{ column: 'case_id', op: 'in', value: caseIds }],
+      limit: 2000,
+      orderBy: [{ column: 'scheduled_at', direction: 'asc' }],
+    });
     for (const h of hearingsPage.rows) {
       const cid = String(h.case_id);
       const list = hearingsByCase.get(cid) ?? [];
@@ -234,7 +583,10 @@ export class CaseService {
       hearingsByCase.set(cid, list);
     }
     // Batch file links
-    const fileLinks = await db.query('case_file_case', { filters: [{ column: 'case_id', op: 'in', value: caseIds }], limit: 2000 });
+    const fileLinks = await relatedRows(db, 'case_file_case', {
+      filters: [{ column: 'case_id', op: 'in', value: caseIds }],
+      limit: 2000,
+    });
     const fileIdsByCase = new Map<string, string[]>();
     for (const link of fileLinks.rows) {
       const cid = String(link.case_id);
@@ -247,7 +599,10 @@ export class CaseService {
     let partyLinksByFile = new Map<string, EngineRow[]>();
     let partyCache = new Map<string, EngineRow>();
     if (allFileIds.length > 0) {
-      const pl = await db.query('case_file_party', { filters: [{ column: 'file_id', op: 'in', value: allFileIds }], limit: 3000 });
+      const pl = await relatedRows(db, 'case_file_party', {
+        filters: [{ column: 'file_id', op: 'in', value: allFileIds }],
+        limit: 3000,
+      });
       for (const link of pl.rows) {
         const fid = String(link.file_id);
         const list = partyLinksByFile.get(fid) ?? [];
@@ -258,14 +613,20 @@ export class CaseService {
       partyCache = await cache.many('party', partyIds);
     }
     // Batch judgments count
-    const judgmentsPage = await db.query('judgment', { filters: [{ column: 'case_id', op: 'in', value: caseIds }], limit: 2000 });
+    const judgmentsPage = await relatedRows(db, 'judgment', {
+      filters: [{ column: 'case_id', op: 'in', value: caseIds }],
+      limit: 2000,
+    });
     const judgmentsCountByCase = new Map<string, number>();
     for (const j of judgmentsPage.rows) {
       const cid = String(j.case_id);
       judgmentsCountByCase.set(cid, (judgmentsCountByCase.get(cid) ?? 0) + 1);
     }
     // Batch tasks count
-    const tasksPage = await db.query('task', { filters: [{ column: 'case_id', op: 'in', value: caseIds }], limit: 2000 });
+    const tasksPage = await relatedRows(db, 'task', {
+      filters: [{ column: 'case_id', op: 'in', value: caseIds }],
+      limit: 2000,
+    });
     const tasksCountByCase = new Map<string, number>();
     for (const t of tasksPage.rows) {
       const cid = String(t.case_id);
@@ -274,27 +635,36 @@ export class CaseService {
 
     for (const legalCase of cases) {
       const cid = String(legalCase.id);
-      const court = legalCase.court_id ? courts.get(String(legalCase.court_id)) : null;
-      const circuit = legalCase.circuit_id ? circuits.get(String(legalCase.circuit_id)) : null;
+      const court = legalCase.court_id
+        ? courts.get(String(legalCase.court_id))
+        : null;
+      const circuit = legalCase.circuit_id
+        ? circuits.get(String(legalCase.circuit_id))
+        : null;
       const hearings = hearingsByCase.get(cid) ?? [];
-      const next = hearings.find((h) => String(h.scheduled_at) >= now && h.status_id !== lookups.id('hearing_status', 'cancelled'));
-      const last = [...hearings].reverse().find((h) => String(h.scheduled_at) < now);
+      const next = hearings.find(
+        (h) =>
+          String(h.scheduled_at) >= now &&
+          h.status_id !== lookups.id('hearing_status', 'cancelled'),
+      );
+      const last = [...hearings]
+        .reverse()
+        .find((h) => String(h.scheduled_at) < now);
       const fileIds = fileIdsByCase.get(cid) ?? [];
       // Derive client / opponent names from party links
       const clientNames: string[] = [];
       const opponentNames: string[] = [];
       const seenParties = new Set<string>();
       for (const fid of fileIds) {
-        const links = partyLinksByFile.get(fid) ?? [];
+        const links = scopedPartyLinks(partyLinksByFile.get(fid) ?? [], cid);
         for (const link of links) {
           const party = partyCache.get(String(link.party_id));
           if (!party) continue;
           const pid = String(party.id);
           if (seenParties.has(pid)) continue;
           seenParties.add(pid);
-          const roleCode = lookups.byId(String(link.role_id ?? ''))?.code ?? '';
           const display = String(party.display_name ?? '');
-          if (roleCode === 'client') clientNames.push(display);
+          if (link.is_office_client === 1) clientNames.push(display);
           else opponentNames.push(display);
         }
       }
@@ -303,9 +673,13 @@ export class CaseService {
         legalCase,
         courtName: court ? String(court.name) : '—',
         circuitName: circuit ? String(circuit.name) : '—',
-        caseTypeName: lookups.byId(String(legalCase.case_type_id ?? ''))?.nameAr ?? '—',
-        degreeName: lookups.byId(String(legalCase.litigation_degree_id ?? ''))?.nameAr ?? '—',
-        statusName: lookups.byId(String(legalCase.status_id ?? ''))?.nameAr ?? '—',
+        caseTypeName:
+          lookups.byId(String(legalCase.case_type_id ?? ''))?.nameAr ?? '—',
+        degreeName:
+          lookups.byId(String(legalCase.litigation_degree_id ?? ''))?.nameAr ??
+          '—',
+        statusName:
+          lookups.byId(String(legalCase.status_id ?? ''))?.nameAr ?? '—',
         clientNames,
         opponentNames,
         hearingsCount: hearings.length,
@@ -317,7 +691,9 @@ export class CaseService {
         isArchived: Boolean(legalCase.archived_at),
         hasMissingData: missing.length > 0,
         missingReasons: missing,
-        lastActivityAt: legalCase.updated_at ? String(legalCase.updated_at) : null,
+        lastActivityAt: legalCase.updated_at
+          ? String(legalCase.updated_at)
+          : null,
       });
     }
     return rows;
@@ -327,134 +703,10 @@ export class CaseService {
     const reasons: string[] = [];
     if (!legalCase.court_id) reasons.push('المحكمة غير مسجلة');
     if (!legalCase.case_type_id) reasons.push('نوع الدعوى غير محدد');
-    if (!legalCase.subject || String(legalCase.subject).trim().length < 5) reasons.push('موضوع الدعوى ناقص');
+    if (!legalCase.subject || String(legalCase.subject).trim().length < 5)
+      reasons.push('موضوع الدعوى ناقص');
     if (!legalCase.registration_date) reasons.push('تاريخ القيد غير مسجل');
     return reasons;
-  }
-
-  private async searchCandidateIds(query: string): Promise<Set<string>> {
-    const { db } = this.deps;
-    const trimmed = query.trim();
-    if (!trimmed) return new Set();
-    const ids = new Set<string>();
-    // FTS over legal_case
-    let offset = 0;
-    for (;;) {
-      const page = await db.searchPage(trimmed, { entityType: 'legal_case', limit: 200, offset });
-      for (const hit of page.hits) ids.add(hit.entityId);
-      offset += page.hits.length;
-      if (page.hits.length === 0 || offset >= page.total || ids.size >= 600) break;
-    }
-    // If query contains slash like "123 / 2026", parse
-    const slash = trimmed.match(/(\d+)\s*[\\/]\s*(\d{4})/);
-    if (slash) {
-      const num = slash[1]!;
-      const year = Number(slash[2]!);
-      const exact = await db.query('legal_case', { filters: [{ column: 'case_number', op: 'eq', value: num }, { column: 'case_year', op: 'eq', value: year }], limit: 50 });
-      for (const row of exact.rows) ids.add(String((row as EngineRow).id));
-    }
-    // Party name search -> linked cases via file parties
-    const partyHits = await this.searchPartyIds(trimmed);
-    if (partyHits.length > 0) {
-      const partyIdSet = partyHits.slice(0, 20);
-      const fileParties = await db.query('case_file_party', { filters: [{ column: 'party_id', op: 'in', value: partyIdSet }], limit: 2000 });
-      const fileIds = [...new Set(fileParties.rows.map((r) => String(r.file_id)))];
-      if (fileIds.length > 0) {
-        const caseLinks = await db.query('case_file_case', { filters: [{ column: 'file_id', op: 'in', value: fileIds }], limit: 2000 });
-        for (const link of caseLinks.rows) ids.add(String(link.case_id));
-      }
-    }
-    return ids;
-  }
-
-  private async searchPartyIds(query: string): Promise<string[]> {
-    const { db } = this.deps;
-    const results: string[] = [];
-    // Use search FTS for party if available, else fallback to LIKE via query contains
-    try {
-      let offset = 0;
-      for (;;) {
-        const page = await db.searchPage(query, { entityType: 'party', limit: 100, offset });
-        for (const hit of page.hits) results.push(hit.entityId);
-        offset += page.hits.length;
-        if (page.hits.length === 0 || results.length >= 30 || offset >= page.total) break;
-      }
-    } catch { /* ignore */ }
-    if (results.length === 0) {
-      // fallback direct query with contains on display_name
-      const direct = await db.query('party', { filters: [{ column: 'display_name', op: 'contains', value: query }], limit: 30 });
-      for (const row of direct.rows) results.push(String((row as EngineRow).id));
-    }
-    return results;
-  }
-
-  private async directSearchFallback(query: string): Promise<EngineRow[]> {
-    const { db } = this.deps;
-    const results: EngineRow[] = [];
-    const seen = new Set<string>();
-    const add = (rows: EngineRow[]) => {
-      for (const r of rows) {
-        const id = String(r.id);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        results.push(r);
-      }
-    };
-    // case_number contains
-    try {
-      const byNumber = await db.query('legal_case', { filters: [{ column: 'case_number', op: 'contains', value: query }], limit: 100 });
-      add(byNumber.rows as EngineRow[]);
-    } catch { /* */ }
-    try {
-      const bySubject = await db.query('legal_case', { filters: [{ column: 'subject', op: 'contains', value: query }], limit: 100 });
-      add(bySubject.rows as EngineRow[]);
-    } catch { /* */ }
-    // Also court name match: query courts first
-    try {
-      const courts = await db.query('court', { filters: [{ column: 'name', op: 'contains', value: query }], limit: 20 });
-      const courtIds = courts.rows.map((r) => String((r as EngineRow).id));
-      if (courtIds.length > 0) {
-        const byCourt = await db.query('legal_case', { filters: [{ column: 'court_id', op: 'in', value: courtIds }], limit: 100 });
-        add(byCourt.rows as EngineRow[]);
-      }
-    } catch { /* */ }
-    return results;
-  }
-
-  private async nextHearingCaseIds(): Promise<Set<string>> {
-    const { db, lookups } = this.deps;
-    const now = new Date().toISOString();
-    const cancelledId = lookups.id('hearing_status', 'cancelled');
-    const future = await db.query('hearing', {
-      filters: [
-        { column: 'scheduled_at', op: 'gte', value: now },
-        ...(cancelledId ? [{ column: 'status_id', op: 'neq' as const, value: cancelledId }] : []),
-      ],
-      limit: 5000,
-      orderBy: [{ column: 'scheduled_at', direction: 'asc' }],
-    });
-    const set = new Set<string>();
-    for (const h of future.rows) set.add(String((h as EngineRow).case_id));
-    return set;
-  }
-
-  private async batchHasNext(caseIds: Set<string>): Promise<Map<string, boolean>> {
-    const { db, lookups } = this.deps;
-    const now = new Date().toISOString();
-    const cancelledId = lookups.id('hearing_status', 'cancelled');
-    const map = new Map<string, boolean>();
-    for (const id of caseIds) map.set(id, false);
-    if (caseIds.size === 0) return map;
-    const future = await db.query('hearing', {
-      filters: [
-        { column: 'case_id', op: 'in', value: [...caseIds] },
-        { column: 'scheduled_at', op: 'gte', value: now },
-        ...(cancelledId ? [{ column: 'status_id', op: 'neq' as const, value: cancelledId }] : []),
-      ],
-      limit: 2000,
-    });
-    for (const h of future.rows) map.set(String((h as EngineRow).case_id), true);
-    return map;
   }
 
   async get(caseId: string): Promise<CaseDetail | null> {
@@ -466,47 +718,57 @@ export class CaseService {
       return null;
     }
     if (!full) return null;
-    const court = await cache.get('court', full.legalCase.court_id ? String(full.legalCase.court_id) : null);
-    const circuit = await cache.get('court_circuit', full.legalCase.circuit_id ? String(full.legalCase.circuit_id) : null);
+    const court = await cache.get(
+      'court',
+      full.legalCase.court_id ? String(full.legalCase.court_id) : null,
+    );
+    const circuit = await cache.get(
+      'court_circuit',
+      full.legalCase.circuit_id ? String(full.legalCase.circuit_id) : null,
+    );
     const parties: CaseDetail['parties'] = [];
-    // Gather parties via files; deduplicate by party_id
     const fileIds = full.files.map((f) => String(f.id));
-    if (fileIds.length > 0) {
-      const links = await db.query('case_file_party', {
-        filters: [{ column: 'file_id', op: 'in', value: fileIds }],
-        limit: 500,
-      });
-      const seen = new Set<string>();
-      for (const link of links.rows) {
-        const pid = String(link.party_id);
-        if (seen.has(pid)) continue;
-        seen.add(pid);
-        const party = await cache.get('party', pid);
-        if (!party) continue;
-        parties.push({
-          party,
-          roleName: lookups.byId(String(link.role_id ?? ''))?.nameAr ?? '—',
-          roleCode: lookups.byId(String(link.role_id ?? ''))?.code ?? '',
-          sideName: lookups.byId(String(link.side_id ?? ''))?.nameAr ?? '—',
-          fileId: String(link.file_id),
-          linkId: String(link.id),
-        });
-      }
-    }
-    // Also consider case_file_party where case_id directly (legacy)
-    const directPartyLinks = await db.query('case_file_party', { filters: [{ column: 'case_id', op: 'eq', value: caseId }], limit: 100 });
-    for (const link of directPartyLinks.rows) {
-      const pid = String(link.party_id);
-      if (parties.some((p) => String(p.party.id) === pid)) continue;
-      const party = await cache.get('party', pid);
+    const fileLinks = fileIds.length
+      ? (
+          await relatedRows(db, 'case_file_party', {
+            filters: [{ column: 'file_id', op: 'in', value: fileIds }],
+          })
+        ).rows
+      : [];
+    const directLinks = (
+      await relatedRows(db, 'case_file_party', {
+        filters: [{ column: 'case_id', op: 'eq', value: caseId }],
+      })
+    ).rows;
+    const scoped = scopedPartyLinks(
+      [
+        ...new Map(
+          [...fileLinks, ...directLinks].map((link) => [String(link.id), link]),
+        ).values(),
+      ],
+      caseId,
+    );
+    const partyMap = await cache.many(
+      'party',
+      scoped.map((l) => String(l.party_id)),
+    );
+    const seen = new Set<string>();
+    for (const link of scoped) {
+      const key = `${String(link.file_id)}:${String(link.party_id)}:${String(link.role_id)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const party = partyMap.get(String(link.party_id));
       if (!party) continue;
       parties.push({
         party,
-        roleName: lookups.byId(String(link.role_id ?? ''))?.nameAr ?? '—',
-        roleCode: lookups.byId(String(link.role_id ?? ''))?.code ?? '',
-        sideName: lookups.byId(String(link.side_id ?? ''))?.nameAr ?? '—',
-        fileId: String(link.file_id ?? ''),
+        roleName: lookups.byId(String(link.role_id))?.nameAr ?? '—',
+        roleCode: lookups.byId(String(link.role_id))?.code ?? '',
+        sideName: lookups.byId(String(link.side_id))?.nameAr ?? '—',
+        sideCode: lookups.byId(String(link.side_id))?.code ?? '',
+        fileId: String(link.file_id),
         linkId: String(link.id),
+        inherited: !link.case_id,
+        isOfficeClient: link.is_office_client === 1,
       });
     }
     const hearings: HearingSummary[] = full.hearings.map((hearing) => ({
@@ -520,15 +782,18 @@ export class CaseService {
     const judgments: JudgmentSummary[] = full.judgments.map((judgment) => ({
       judgment,
       caseNumber: String(full.legalCase.case_number),
-      typeName: lookups.byId(String(judgment.judgment_type_id ?? ''))?.nameAr ?? '—',
+      typeName:
+        lookups.byId(String(judgment.judgment_type_id ?? ''))?.nameAr ?? '—',
       statusName: lookups.byId(String(judgment.status_id ?? ''))?.nameAr ?? '—',
     }));
-    const tasks = (await db.query('task', {
-      filters: [{ column: 'case_id', op: 'eq', value: caseId }],
-      orderBy: [{ column: 'due_at', direction: 'asc' }],
-      limit: 100,
-    })).rows as EngineRow[];
-    const docLinks = await db.query('document_link', {
+    const tasks = (
+      await relatedRows(db, 'task', {
+        filters: [{ column: 'case_id', op: 'eq', value: caseId }],
+        orderBy: [{ column: 'due_at', direction: 'asc' }],
+        limit: 100,
+      })
+    ).rows as EngineRow[];
+    const docLinks = await relatedRows(db, 'document_link', {
       filters: [{ column: 'case_id', op: 'eq', value: caseId }],
       limit: 100,
     });
@@ -541,69 +806,112 @@ export class CaseService {
     const taskIds = tasks.map((t) => String(t.id));
     let announcements: EngineRow[] = [];
     if (taskIds.length > 0) {
-      const ann = await db.query('announcement', { filters: [{ column: 'task_id', op: 'in', value: taskIds }], limit: 100 });
+      const ann = await relatedRows(db, 'announcement', {
+        filters: [{ column: 'task_id', op: 'in', value: taskIds }],
+        limit: 100,
+      });
       announcements = ann.rows as EngineRow[];
     }
     // Notes for this case (via case_id or via file)
     let notes: EngineRow[] = [];
     {
-      const byCase = await db.query('case_note', { filters: [{ column: 'case_id', op: 'eq', value: caseId }], limit: 100 });
+      const byCase = await relatedRows(db, 'case_note', {
+        filters: [{ column: 'case_id', op: 'eq', value: caseId }],
+        limit: 100,
+      });
       notes = byCase.rows as EngineRow[];
       if (fileIds.length > 0) {
-        const byFile = await db.query('case_note', { filters: [{ column: 'file_id', op: 'in', value: fileIds }], limit: 100 });
+        const byFile = await relatedRows(db, 'case_note', {
+          filters: [
+            { column: 'file_id', op: 'in', value: fileIds },
+            { column: 'case_id', op: 'isNull' },
+          ],
+          limit: 100,
+        });
         for (const n of byFile.rows) {
           if (String((n as EngineRow).case_id) === caseId) continue;
-          if (notes.some((x) => String(x.id) === String((n as EngineRow).id))) continue;
+          if (notes.some((x) => String(x.id) === String((n as EngineRow).id)))
+            continue;
           notes.push(n as EngineRow);
         }
       }
-      notes.sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+      notes.sort((a, b) =>
+        String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')),
+      );
     }
     // Related cases via legal_case_link
-    const outgoing = await db.query('legal_case_link', { filters: [{ column: 'source_case_id', op: 'eq', value: caseId }], limit: 100 });
-    const incoming = await db.query('legal_case_link', { filters: [{ column: 'target_case_id', op: 'eq', value: caseId }], limit: 100 });
+    const outgoing = await relatedRows(db, 'legal_case_link', {
+      filters: [{ column: 'source_case_id', op: 'eq', value: caseId }],
+      limit: 100,
+    });
+    const incoming = await relatedRows(db, 'legal_case_link', {
+      filters: [{ column: 'target_case_id', op: 'eq', value: caseId }],
+      limit: 100,
+    });
     const relatedLinks = [...outgoing.rows, ...incoming.rows] as EngineRow[];
     const relatedCases: CaseDetail['relatedCases'] = [];
     for (const link of relatedLinks) {
       const isOutgoing = String(link.source_case_id) === caseId;
-      const otherId = isOutgoing ? String(link.target_case_id) : String(link.source_case_id);
+      const otherId = isOutgoing
+        ? String(link.target_case_id)
+        : String(link.source_case_id);
       const other = await db.get('legal_case', otherId);
       relatedCases.push({
         link: link as EngineRow,
         legalCase: other as EngineRow | null,
-        relationName: lookups.byId(String(link.relation_type_id ?? ''))?.nameAr ?? 'مرتبطة',
+        relationName:
+          lookups.byId(String(link.relation_type_id ?? ''))?.nameAr ?? 'مرتبطة',
         direction: isOutgoing ? 'outgoing' : 'incoming',
       });
     }
 
     const activity = await db.auditTrail('legal_case', caseId, 40);
     // Compute alerts
-    const alerts = this.computeAlerts(full.legalCase as EngineRow, hearings, tasks, parties, announcements);
+    const alerts = this.computeAlerts(
+      full.legalCase as EngineRow,
+      hearings,
+      tasks,
+      parties,
+      announcements,
+    );
 
     // Outstanding finance via files: sum charges not yet paid
     let outstandingMinor: number | null = null;
     if (fileIds.length > 0) {
       try {
-        const charges = await db.query('financial_charge', { filters: [{ column: 'file_id', op: 'in', value: fileIds }], limit: 100 });
+        const charges = await relatedRows(db, 'financial_charge', {
+          filters: [{ column: 'file_id', op: 'in', value: fileIds }],
+          limit: 100,
+        });
         let total = 0;
         let has = false;
         for (const ch of charges.rows) {
           const crow = ch as EngineRow;
-          if (crow.status_id === lookups.id('charge_status', 'cancelled')) continue;
+          if (crow.status_id === lookups.id('charge_status', 'cancelled'))
+            continue;
           const bal = await db.chargeBalance(String(crow.id));
-          if (bal.outstandingMinor > 0) { total += bal.outstandingMinor; has = true; }
+          if (bal.outstandingMinor > 0) {
+            total += bal.outstandingMinor;
+            has = true;
+          }
         }
         outstandingMinor = has ? total : 0;
-      } catch { outstandingMinor = null; }
+      } catch {
+        outstandingMinor = null;
+      }
     }
 
     return {
       legalCase: full.legalCase as EngineRow,
       courtName: court ? String(court.name) : '—',
       circuitName: circuit ? String(circuit.name) : '—',
-      caseTypeName: lookups.byId(String(full.legalCase.case_type_id ?? ''))?.nameAr ?? '—',
-      statusName: lookups.byId(String(full.legalCase.status_id ?? ''))?.nameAr ?? '—',
-      degreeName: lookups.byId(String(full.legalCase.litigation_degree_id ?? ''))?.nameAr ?? '—',
+      caseTypeName:
+        lookups.byId(String(full.legalCase.case_type_id ?? ''))?.nameAr ?? '—',
+      statusName:
+        lookups.byId(String(full.legalCase.status_id ?? ''))?.nameAr ?? '—',
+      degreeName:
+        lookups.byId(String(full.legalCase.litigation_degree_id ?? ''))
+          ?.nameAr ?? '—',
       files: full.files as EngineRow[],
       parties,
       hearings,
@@ -620,25 +928,103 @@ export class CaseService {
     };
   }
 
-  private computeAlerts(legalCase: EngineRow, hearings: HearingSummary[], tasks: EngineRow[], parties: CaseDetail['parties'], announcements: EngineRow[]): CaseDetail['alerts'] {
+  private computeAlerts(
+    legalCase: EngineRow,
+    hearings: HearingSummary[],
+    tasks: EngineRow[],
+    parties: CaseDetail['parties'],
+    announcements: EngineRow[],
+  ): CaseDetail['alerts'] {
     const alerts: CaseDetail['alerts'] = [];
     const now = new Date().toISOString();
     const hasNext = hearings.some((h) => String(h.hearing.scheduled_at) >= now);
-    const hasPastUnrecorded = hearings.some((h) => String(h.hearing.scheduled_at) < now && !h.hearing.held_at && h.hearing.status_id === this.deps.lookups.id('hearing_status', 'scheduled'));
-    if (hasPastUnrecorded) alerts.push({ kind: 'warning', title: 'جلسة سابقة بلا نتيجة مسجلة', description: 'هناك جلسة انعقد موعدها دون تسجيل ما حدث فيها. سجّل نتيجة الجلسة لتحديث سير القضية.' });
-    if (!hasNext && hearings.length > 0) alerts.push({ kind: 'info', title: 'لا توجد جلسة قادمة', description: 'لم يتم تحديد موعد للجلسة التالية. أضف جلسة جديدة عند معرفة الموعد.' });
-    if (!legalCase.court_id) alerts.push({ kind: 'danger', title: 'بيانات المحكمة ناقصة', description: 'القضية بلا محكمة محددة. أضف المحكمة والدائرة لضمان صحة السجلات والتنبيهات.' });
-    if (!legalCase.subject || String(legalCase.subject).trim().length < 10) alerts.push({ kind: 'warning', title: 'موضوع الدعوى غير مكتمل', description: 'أضف وصفًا مختصرًا لموضوع الدعوى والطلبات ليتعرف الفريق على مضمونها بسرعة.' });
-    if (parties.length === 0) alerts.push({ kind: 'warning', title: 'لا أطراف مرتبطة', description: 'القضية بلا أطراف مسجلة. اربط الموكل والخصوم من خلال ملف القضية.' });
-    else if (parties.some((p) => !p.roleCode || p.roleName === '—')) alerts.push({ kind: 'info', title: 'صفة بعض الأطراف غير محددة', description: 'راجع صفات الأطراف وتأكد من تحديد دور كل طرف في الدعوى.' });
-    const overdueTasks = tasks.filter((t) => t.due_at && String(t.due_at) < now && !['completed', 'cancelled'].includes(this.deps.lookups.byId(String(t.status_id ?? ''))?.code ?? ''));
-    if (overdueTasks.length > 0) alerts.push({ kind: 'danger', title: `${overdueTasks.length} عمل إداري متأخر`, description: 'هناك أعمال تجاوز موعد استحقاقها. راجع قائمة الأعمال الإدارية داخل القضية.' });
+    const hasPastUnrecorded = hearings.some(
+      (h) =>
+        String(h.hearing.scheduled_at) < now &&
+        !h.hearing.held_at &&
+        h.hearing.status_id ===
+          this.deps.lookups.id('hearing_status', 'scheduled'),
+    );
+    if (hasPastUnrecorded)
+      alerts.push({
+        kind: 'warning',
+        title: 'جلسة سابقة بلا نتيجة مسجلة',
+        description:
+          'هناك جلسة انعقد موعدها دون تسجيل ما حدث فيها. سجّل نتيجة الجلسة لتحديث سير القضية.',
+      });
+    if (!hasNext && hearings.length > 0)
+      alerts.push({
+        kind: 'info',
+        title: 'لا توجد جلسة قادمة',
+        description:
+          'لم يتم تحديد موعد للجلسة التالية. أضف جلسة جديدة عند معرفة الموعد.',
+      });
+    if (!legalCase.court_id)
+      alerts.push({
+        kind: 'danger',
+        title: 'بيانات المحكمة ناقصة',
+        description:
+          'القضية بلا محكمة محددة. أضف المحكمة والدائرة لضمان صحة السجلات والتنبيهات.',
+      });
+    if (!legalCase.subject || String(legalCase.subject).trim().length < 10)
+      alerts.push({
+        kind: 'warning',
+        title: 'موضوع الدعوى غير مكتمل',
+        description:
+          'أضف وصفًا مختصرًا لموضوع الدعوى والطلبات ليتعرف الفريق على مضمونها بسرعة.',
+      });
+    if (parties.length === 0)
+      alerts.push({
+        kind: 'warning',
+        title: 'لا أطراف مرتبطة',
+        description:
+          'القضية بلا أطراف مسجلة. اربط الموكل والخصوم من خلال ملف القضية.',
+      });
+    else if (parties.some((p) => !p.roleCode || p.roleName === '—'))
+      alerts.push({
+        kind: 'info',
+        title: 'صفة بعض الأطراف غير محددة',
+        description: 'راجع صفات الأطراف وتأكد من تحديد دور كل طرف في الدعوى.',
+      });
+    const overdueTasks = tasks.filter(
+      (t) =>
+        t.due_at &&
+        String(t.due_at) < now &&
+        !['completed', 'cancelled'].includes(
+          this.deps.lookups.byId(String(t.status_id ?? ''))?.code ?? '',
+        ),
+    );
+    if (overdueTasks.length > 0)
+      alerts.push({
+        kind: 'danger',
+        title: `${overdueTasks.length} عمل إداري متأخر`,
+        description:
+          'هناك أعمال تجاوز موعد استحقاقها. راجع قائمة الأعمال الإدارية داخل القضية.',
+      });
     const unserved = announcements.filter((a) => !a.served_on);
-    if (unserved.length > 0) alerts.push({ kind: 'info', title: 'إعلانات بلا تأكيد تسليم', description: `يوجد ${unserved.length} إجراء إعلان لم تُسجل نتيجته بعد.` });
-    if (!hasNext && tasks.length === 0 && legalCase.status_id !== this.deps.lookups.id('case_status', 'closed')) {
+    if (unserved.length > 0)
+      alerts.push({
+        kind: 'info',
+        title: 'إعلانات بلا تأكيد تسليم',
+        description: `يوجد ${unserved.length} إجراء إعلان لم تُسجل نتيجته بعد.`,
+      });
+    if (
+      !hasNext &&
+      tasks.length === 0 &&
+      legalCase.status_id !== this.deps.lookups.id('case_status', 'closed')
+    ) {
       // gentle hint for stagnant case: no future hearing and no open tasks, not recently updated
-      const daysSinceUpdate = legalCase.updated_at ? (Date.now() - new Date(String(legalCase.updated_at)).getTime()) / 86400000 : 999;
-      if (daysSinceUpdate > 30) alerts.push({ kind: 'info', title: 'القضية لم تُحدّث منذ فترة', description: 'مرّ أكثر من 30 يومًا دون تحديث. راجع بياناتها للتأكد من اكتمالها.' });
+      const daysSinceUpdate = legalCase.updated_at
+        ? (Date.now() - new Date(String(legalCase.updated_at)).getTime()) /
+          86400000
+        : 999;
+      if (daysSinceUpdate > 30)
+        alerts.push({
+          kind: 'info',
+          title: 'القضية لم تُحدّث منذ فترة',
+          description:
+            'مرّ أكثر من 30 يومًا دون تحديث. راجع بياناتها للتأكد من اكتمالها.',
+        });
     }
     return alerts;
   }
@@ -659,52 +1045,94 @@ export class CaseService {
     notes?: string;
   }): Promise<EngineRow> {
     const { db, lookups } = this.deps;
-    if (!input.caseNumber.trim()) throw new ValidationError('case number is required');
-    const legalCase = await db.createCase({
-      caseNumber: input.caseNumber.trim(),
-      caseYear: input.caseYear,
-      ...(input.caseTypeCode ? { caseTypeCode: input.caseTypeCode } : {}),
-      ...(input.courtId ? { courtId: input.courtId } : {}),
-      ...(input.fileIds ? { fileIds: input.fileIds } : {}),
-      ...(input.litigationDegreeCode ? { litigationDegreeCode: input.litigationDegreeCode } : {}),
-      ...(input.subject ? { subject: input.subject } : {}),
+    if (!input.caseNumber.trim())
+      throw new ValidationError('case number is required');
+    return db.transaction(async () => {
+      const legalCase = await db.createCase({
+        caseNumber: input.caseNumber.trim(),
+        caseYear: input.caseYear,
+        ...(input.caseTypeCode ? { caseTypeCode: input.caseTypeCode } : {}),
+        ...(input.courtId ? { courtId: input.courtId } : {}),
+        ...(input.fileIds ? { fileIds: input.fileIds } : {}),
+        ...(input.litigationDegreeCode
+          ? { litigationDegreeCode: input.litigationDegreeCode }
+          : {}),
+        ...(input.subject ? { subject: input.subject } : {}),
+      });
+      const patch: Record<string, unknown> = {};
+      if (input.circuitId) patch.circuit_id = input.circuitId;
+      if (input.statusCode)
+        patch.status_id = lookups.id('case_status', input.statusCode);
+      if (input.claimAmountMinor !== undefined)
+        patch.claim_amount_minor = input.claimAmountMinor;
+      if (input.currencyCode) patch.currency_code = input.currencyCode;
+      if (input.registrationDate)
+        patch.registration_date = input.registrationDate;
+      if (input.notes) patch.notes = input.notes;
+      if (patch.circuit_id) {
+        const courtId = (input.courtId ??
+          (legalCase.court_id as string | null) ??
+          null) as string | null;
+        if (!courtId) throw new ValidationError('الدائرة تتطلب محكمة');
+        const circuit = await db.get('court_circuit', String(patch.circuit_id));
+        if (!circuit) throw new ValidationError('الدائرة غير موجودة');
+        if (String(circuit.court_id) !== String(courtId))
+          throw new ValidationError('الدائرة لا تتبع المحكمة المختارة');
+      }
+      if (Object.keys(patch).length > 0)
+        await db.update('legal_case', String(legalCase.id), patch);
+      this.deps.cache.invalidate();
+      return (await db.get('legal_case', String(legalCase.id))) ?? legalCase;
     });
-    const patch: Record<string, unknown> = {};
-    if (input.circuitId) patch.circuit_id = input.circuitId;
-    if (input.statusCode) patch.status_id = lookups.id('case_status', input.statusCode);
-    if (input.claimAmountMinor !== undefined) patch.claim_amount_minor = input.claimAmountMinor;
-    if (input.currencyCode) patch.currency_code = input.currencyCode;
-    if (input.registrationDate) patch.registration_date = input.registrationDate;
-    if (input.notes) patch.notes = input.notes;
-    if (patch.circuit_id) {
-      const courtId = (input.courtId ?? (legalCase.court_id as string | null) ?? null) as string | null;
-      if (!courtId) throw new ValidationError('الدائرة تتطلب محكمة');
-      const circuit = await db.get('court_circuit', String(patch.circuit_id));
-      if (!circuit) throw new ValidationError('الدائرة غير موجودة');
-      if (String(circuit.court_id) !== String(courtId)) throw new ValidationError('الدائرة لا تتبع المحكمة المختارة');
-    }
-    if (Object.keys(patch).length > 0) await db.update('legal_case', String(legalCase.id), patch);
-    this.deps.cache.invalidate();
-    return (await db.get('legal_case', String(legalCase.id))) ?? legalCase;
   }
 
-  async update(caseId: string, patch: Record<string, unknown>): Promise<EngineRow> {
+  async update(
+    caseId: string,
+    patch: Record<string, unknown>,
+  ): Promise<EngineRow> {
     const lookups = this.deps.lookups;
     const mapped: Record<string, unknown> = { ...patch };
-    if (typeof patch.caseTypeCode === 'string') { mapped.case_type_id = lookups.id('case_type', patch.caseTypeCode as string); delete mapped.caseTypeCode; }
-    if (typeof patch.litigationDegreeCode === 'string') { mapped.litigation_degree_id = lookups.id('litigation_degree', patch.litigationDegreeCode as string); delete mapped.litigationDegreeCode; }
-    if (typeof patch.statusCode === 'string') { mapped.status_id = lookups.id('case_status', patch.statusCode as string); delete mapped.statusCode; }
-    for (const key of ['court_id', 'circuit_id', 'subject', 'notes', 'registration_date']) {
+    if (typeof patch.caseTypeCode === 'string') {
+      mapped.case_type_id = lookups.id(
+        'case_type',
+        patch.caseTypeCode as string,
+      );
+      delete mapped.caseTypeCode;
+    }
+    if (typeof patch.litigationDegreeCode === 'string') {
+      mapped.litigation_degree_id = lookups.id(
+        'litigation_degree',
+        patch.litigationDegreeCode as string,
+      );
+      delete mapped.litigationDegreeCode;
+    }
+    if (typeof patch.statusCode === 'string') {
+      mapped.status_id = lookups.id('case_status', patch.statusCode as string);
+      delete mapped.statusCode;
+    }
+    for (const key of [
+      'court_id',
+      'circuit_id',
+      'subject',
+      'notes',
+      'registration_date',
+    ]) {
       if (mapped[key] === '') mapped[key] = null;
     }
     // Validate circuit belongs to court if both provided or if circuit provided we fetch existing court
-    const nextCourtId = (mapped.court_id as string | null | undefined) ?? (await this.deps.db.get('legal_case', caseId) as EngineRow | undefined)?.court_id as string | null | undefined;
-    const nextCircuitId = mapped.circuit_id as string | null | undefined;
+    const existing = await this.deps.db.require('legal_case', caseId);
+    const nextCourtId =
+      'court_id' in mapped ? mapped.court_id : existing.court_id;
+    const nextCircuitId = (
+      'circuit_id' in mapped ? mapped.circuit_id : existing.circuit_id
+    ) as string | null | undefined;
     if (nextCircuitId) {
-      if (!nextCourtId) throw new ValidationError('الدائرة تتطلب تحديد المحكمة');
+      if (!nextCourtId)
+        throw new ValidationError('الدائرة تتطلب تحديد المحكمة');
       const circuit = await this.deps.db.get('court_circuit', nextCircuitId);
       if (!circuit) throw new ValidationError('الدائرة غير موجودة');
-      if (String(circuit.court_id) !== String(nextCourtId)) throw new ValidationError('الدائرة لا تتبع المحكمة المختارة');
+      if (String(circuit.court_id) !== String(nextCourtId))
+        throw new ValidationError('الدائرة لا تتبع المحكمة المختارة');
     }
     const updated = await this.deps.db.update('legal_case', caseId, mapped);
     this.deps.cache.invalidate('legal_case', caseId);
@@ -712,13 +1140,17 @@ export class CaseService {
   }
 
   async archive(caseId: string): Promise<EngineRow> {
-    const updated = await this.deps.db.update('legal_case', caseId, { archived_at: new Date().toISOString() });
+    const updated = await this.deps.db.update('legal_case', caseId, {
+      archived_at: new Date().toISOString(),
+    });
     this.deps.cache.invalidate('legal_case', caseId);
     return updated;
   }
 
   async restoreArchived(caseId: string): Promise<EngineRow> {
-    const updated = await this.deps.db.update('legal_case', caseId, { archived_at: null });
+    const updated = await this.deps.db.update('legal_case', caseId, {
+      archived_at: null,
+    });
     this.deps.cache.invalidate('legal_case', caseId);
     return updated;
   }
@@ -733,31 +1165,80 @@ export class CaseService {
     this.deps.cache.invalidate();
   }
 
-  async linkFile(caseId: string, fileId: string, relationTypeCode = 'related'): Promise<void> {
+  async linkFile(
+    caseId: string,
+    fileId: string,
+    relationTypeCode = 'related',
+  ): Promise<void> {
     await this.deps.db.linkCase(caseId, fileId);
     // also allow custom relation type by updating the link row
-    const links = await this.deps.db.query('case_file_case', { filters: [{ column: 'case_id', op: 'eq', value: caseId }, { column: 'file_id', op: 'eq', value: fileId }], limit: 1 });
+    const links = await this.deps.db.query('case_file_case', {
+      filters: [
+        { column: 'case_id', op: 'eq', value: caseId },
+        { column: 'file_id', op: 'eq', value: fileId },
+      ],
+      limit: 1,
+    });
     const link = links.rows[0] as EngineRow | undefined;
     if (link && relationTypeCode !== 'related') {
-      const relId = this.deps.lookups.id('file_relation_type', relationTypeCode);
-      if (relId) await this.deps.db.update('case_file_case', String(link.id), { relation_type_id: relId });
+      const relId = this.deps.lookups.id(
+        'file_relation_type',
+        relationTypeCode,
+      );
+      if (relId)
+        await this.deps.db.update('case_file_case', String(link.id), {
+          relation_type_id: relId,
+        });
     }
     this.deps.cache.invalidate();
   }
 
   async unlinkFile(caseId: string, fileId: string): Promise<void> {
-    const links = await this.deps.db.query('case_file_case', { filters: [{ column: 'case_id', op: 'eq', value: caseId }, { column: 'file_id', op: 'eq', value: fileId }], limit: 10 });
-    for (const link of links.rows) await this.deps.db.softDelete('case_file_case', String((link as EngineRow).id));
+    const links = await this.deps.db.query('case_file_case', {
+      filters: [
+        { column: 'case_id', op: 'eq', value: caseId },
+        { column: 'file_id', op: 'eq', value: fileId },
+      ],
+      limit: 10,
+    });
+    for (const link of links.rows)
+      await this.deps.db.softDelete(
+        'case_file_case',
+        String((link as EngineRow).id),
+      );
     this.deps.cache.invalidate();
   }
 
-  async addParty(input: { caseId: string; fileId: string; partyId: string; roleCode: string; sideCode?: string }): Promise<EngineRow> {
+  async addParty(input: {
+    caseId: string;
+    fileId: string;
+    partyId: string;
+    roleCode: string;
+    sideCode?: string;
+    isClient?: boolean;
+  }): Promise<EngineRow> {
     const { db } = this.deps;
     // Insert via case_file_party with case_id reference; we use db.insert directly to keep case_id
-    const roleId = this.deps.lookups.id('party_role', input.roleCode) ?? this.deps.lookups.id('party_role', 'other')!;
-    const sideId = input.sideCode ? this.deps.lookups.id('party_side', input.sideCode) : null;
-    const existing = await db.query('case_file_party', { filters: [{ column: 'file_id', op: 'eq', value: input.fileId }, { column: 'party_id', op: 'eq', value: input.partyId }], limit: 50 });
-    if (existing.rows.some((r) => String((r as EngineRow).role_id) === roleId)) {
+    const roleId =
+      this.deps.lookups.id('party_role', input.roleCode) ??
+      this.deps.lookups.id('party_role', 'other')!;
+    const sideId = input.sideCode
+      ? this.deps.lookups.id('party_side', input.sideCode)
+      : null;
+    const existing = await db.query('case_file_party', {
+      filters: [
+        { column: 'file_id', op: 'eq', value: input.fileId },
+        { column: 'party_id', op: 'eq', value: input.partyId },
+      ],
+      limit: 50,
+    });
+    if (
+      existing.rows.some(
+        (r) =>
+          r.case_id === input.caseId &&
+          String((r as EngineRow).role_id) === roleId,
+      )
+    ) {
       throw new ValidationError('هذا الطرف مرتبط بالملف بهذه الصفة مسبقًا');
     }
     const ordinal = 10;
@@ -768,6 +1249,7 @@ export class CaseService {
       role_id: roleId,
       side_id: sideId,
       ordinal,
+      is_office_client: (input.isClient ?? input.roleCode === 'client') ? 1 : 0,
       is_primary: 0,
       start_date: null,
       end_date: null,
@@ -777,25 +1259,59 @@ export class CaseService {
     return row;
   }
 
-  async updatePartyRole(linkId: string, roleCode: string, sideCode?: string): Promise<EngineRow> {
-    const roleId = this.deps.lookups.id('party_role', roleCode);
+  async updatePartyRole(
+    linkId: string,
+    roleCode: string,
+    sideCode?: string,
+    isClient?: boolean,
+    caseId?: string,
+  ): Promise<EngineRow> {
+    const { db, lookups } = this.deps;
+    const roleId = lookups.id('party_role', roleCode);
     if (!roleId) throw new ValidationError(`صفة غير معروفة: ${roleCode}`);
-    const patch: Record<string, unknown> = { role_id: roleId };
-    if (sideCode) patch.side_id = this.deps.lookups.id('party_side', sideCode);
-    else if (sideCode === null) patch.side_id = null;
-    const updated = await this.deps.db.update('case_file_party', linkId, patch);
-    this.deps.cache.invalidate();
-    return updated;
+    return db.transaction(async () => {
+      const link = await db.require('case_file_party', linkId);
+      if (caseId && link.case_id !== caseId) {
+        const result = await this.addParty({
+          fileId: String(link.file_id),
+          caseId,
+          partyId: String(link.party_id),
+          roleCode,
+          ...(sideCode ? { sideCode } : {}),
+          isClient: isClient ?? link.is_office_client === 1,
+        });
+        return result;
+      }
+      const patch: Record<string, unknown> = { role_id: roleId };
+      if (sideCode !== undefined)
+        patch.side_id = sideCode ? lookups.id('party_side', sideCode) : null;
+      if (isClient !== undefined) patch.is_office_client = isClient ? 1 : 0;
+      const updated = await db.update('case_file_party', linkId, patch);
+      this.deps.cache.invalidate();
+      return updated;
+    });
   }
 
   async removeParty(linkId: string): Promise<void> {
-    await this.deps.db.softDelete('case_file_party', linkId, 'إزالة طرف من القضية');
+    await this.deps.db.softDelete(
+      'case_file_party',
+      linkId,
+      'إزالة طرف من القضية',
+    );
     this.deps.cache.invalidate();
   }
 
-  async linkCases(sourceCaseId: string, targetCaseId: string, relationTypeCode = 'related', notes?: string): Promise<EngineRow> {
-    if (sourceCaseId === targetCaseId) throw new ValidationError('لا يمكن ربط القضية بنفسها');
-    const relId = this.deps.lookups.id('case_relation_type', relationTypeCode) ?? this.deps.lookups.id('case_relation_type', 'related')!;
+  async linkCases(
+    sourceCaseId: string,
+    targetCaseId: string,
+    relationTypeCode = 'related',
+    notes?: string,
+  ): Promise<EngineRow> {
+    if (sourceCaseId === targetCaseId)
+      throw new ValidationError('لا يمكن ربط القضية بنفسها');
+    const relId =
+      this.deps.lookups.id('case_relation_type', relationTypeCode) ??
+      this.deps.lookups.id('case_relation_type', 'related')!;
     // prevent duplicate link
     const existing = await this.deps.db.query('legal_case_link', {
       filters: [
@@ -804,7 +1320,12 @@ export class CaseService {
       ],
       limit: 10,
     });
-    if (existing.rows.some((r) => String((r as EngineRow).relation_type_id) === relId)) throw new ValidationError('هذا الارتباط موجود مسبقًا');
+    if (
+      existing.rows.some(
+        (r) => String((r as EngineRow).relation_type_id) === relId,
+      )
+    )
+      throw new ValidationError('هذا الارتباط موجود مسبقًا');
     // Prevent circular via simple check: target already links back to source with same type? Still allowed except self.
     const row = await this.deps.db.insert('legal_case_link', {
       source_case_id: sourceCaseId,
@@ -821,7 +1342,14 @@ export class CaseService {
     this.deps.cache.invalidate();
   }
 
-  async createTask(input: { caseId: string; title: string; taskTypeCode?: string; dueAt?: string; description?: string; fileId?: string }): Promise<EngineRow> {
+  async createTask(input: {
+    caseId: string;
+    title: string;
+    taskTypeCode?: string;
+    dueAt?: string;
+    description?: string;
+    fileId?: string;
+  }): Promise<EngineRow> {
     const task = await this.deps.db.createTask({
       title: input.title,
       ...(input.taskTypeCode ? { taskTypeCode: input.taskTypeCode } : {}),
@@ -834,13 +1362,21 @@ export class CaseService {
     return task;
   }
 
-  async changeTaskStatus(taskId: string, statusCode: string): Promise<EngineRow> {
+  async changeTaskStatus(
+    taskId: string,
+    statusCode: string,
+  ): Promise<EngineRow> {
     const task = await this.deps.db.changeTaskStatus(taskId, statusCode);
     this.deps.cache.invalidate();
     return task;
   }
 
-  async addNote(input: { caseId: string; fileId: string; body: string; isPrivate?: boolean }): Promise<EngineRow> {
+  async addNote(input: {
+    caseId: string;
+    fileId: string;
+    body: string;
+    isPrivate?: boolean;
+  }): Promise<EngineRow> {
     if (!input.body.trim()) throw new ValidationError('نص الملاحظة مطلوب');
     const note = await this.deps.db.insert('case_note', {
       file_id: input.fileId,
@@ -853,7 +1389,10 @@ export class CaseService {
   }
 
   async linkDocument(documentId: string, caseId: string): Promise<EngineRow> {
-    const link = await this.deps.db.linkDocument(documentId, { kind: 'case', id: caseId });
+    const link = await this.deps.db.linkDocument(documentId, {
+      kind: 'case',
+      id: caseId,
+    });
     this.deps.cache.invalidate();
     return link;
   }
@@ -863,22 +1402,41 @@ export class CaseService {
     this.deps.cache.invalidate();
   }
 
-  async bulkArchive(caseIds: readonly string[]): Promise<{ succeeded: string[]; failed: Array<{ id: string; error: string }> }> {
+  async bulkArchive(caseIds: readonly string[]): Promise<{
+    succeeded: string[];
+    failed: Array<{ id: string; error: string }>;
+  }> {
     const succeeded: string[] = [];
     const failed: Array<{ id: string; error: string }> = [];
     for (const id of caseIds) {
-      try { await this.archive(id); succeeded.push(id); } catch (e) { failed.push({ id, error: e instanceof Error ? e.message : String(e) }); }
+      try {
+        await this.archive(id);
+        succeeded.push(id);
+      } catch (e) {
+        failed.push({ id, error: e instanceof Error ? e.message : String(e) });
+      }
     }
     return { succeeded, failed };
   }
 
-  async bulkChangeStatus(caseIds: readonly string[], statusCode: string): Promise<{ succeeded: string[]; failed: Array<{ id: string; error: string }> }> {
+  async bulkChangeStatus(
+    caseIds: readonly string[],
+    statusCode: string,
+  ): Promise<{
+    succeeded: string[];
+    failed: Array<{ id: string; error: string }>;
+  }> {
     const statusId = this.deps.lookups.id('case_status', statusCode);
     if (!statusId) throw new ValidationError(`حالة غير معروفة: ${statusCode}`);
     const succeeded: string[] = [];
     const failed: Array<{ id: string; error: string }> = [];
     for (const id of caseIds) {
-      try { await this.deps.db.update('legal_case', id, { status_id: statusId }); succeeded.push(id); } catch (e) { failed.push({ id, error: e instanceof Error ? e.message : String(e) }); }
+      try {
+        await this.deps.db.update('legal_case', id, { status_id: statusId });
+        succeeded.push(id);
+      } catch (e) {
+        failed.push({ id, error: e instanceof Error ? e.message : String(e) });
+      }
     }
     this.deps.cache.invalidate();
     return { succeeded, failed };
@@ -900,18 +1458,28 @@ export class CaseService {
     return hearing;
   }
 
-  async recordHearing(hearingId: string, input: { statusCode?: string; outcomeSummary?: string; heldAt?: string }): Promise<EngineRow> {
+  async recordHearing(
+    hearingId: string,
+    input: { statusCode?: string; outcomeSummary?: string; heldAt?: string },
+  ): Promise<EngineRow> {
     const updated = await this.deps.db.recordHearing(hearingId, {
       ...(input.statusCode ? { statusCode: input.statusCode } : {}),
-      ...(input.outcomeSummary !== undefined ? { outcomeSummary: input.outcomeSummary } : {}),
+      ...(input.outcomeSummary !== undefined
+        ? { outcomeSummary: input.outcomeSummary }
+        : {}),
       ...(input.heldAt ? { heldAt: input.heldAt } : {}),
     });
     this.deps.cache.invalidate();
     return updated;
   }
 
-  async scheduleNext(previousHearingId: string, scheduledAt: string): Promise<EngineRow> {
-    const next = await this.deps.db.scheduleNextHearing(previousHearingId, { scheduledAt });
+  async scheduleNext(
+    previousHearingId: string,
+    scheduledAt: string,
+  ): Promise<EngineRow> {
+    const next = await this.deps.db.scheduleNextHearing(previousHearingId, {
+      scheduledAt,
+    });
     this.deps.cache.invalidate();
     return next;
   }
@@ -931,22 +1499,32 @@ export class CaseService {
       caseId: input.caseId,
       ...(input.hearingId ? { hearingId: input.hearingId } : {}),
       issuedOn: input.issuedOn,
-      ...(input.judgmentTypeCode ? { judgmentTypeCode: input.judgmentTypeCode } : {}),
+      ...(input.judgmentTypeCode
+        ? { judgmentTypeCode: input.judgmentTypeCode }
+        : {}),
       ...(input.operativePart ? { operativePart: input.operativePart } : {}),
       ...(input.reasoning ? { reasoning: input.reasoning } : {}),
       ...(input.fileIds ? { fileIds: input.fileIds } : {}),
     });
     if (input.statusCode) {
-      await db.update('judgment', String(judgment.id), { status_id: lookups.id('judgment_status', input.statusCode) });
+      await db.update('judgment', String(judgment.id), {
+        status_id: lookups.id('judgment_status', input.statusCode),
+      });
     }
     this.deps.cache.invalidate();
     return judgment;
   }
 
-  async searchOptions(query: string, limit = 12): Promise<Array<{ value: string; label: string; description?: string }>> {
+  async searchOptions(
+    query: string,
+    limit = 12,
+  ): Promise<Array<{ value: string; label: string; description?: string }>> {
     const { db } = this.deps;
     const page = query.trim()
-      ? await db.searchPage(query.trim(), { entityType: 'legal_case', limit: Math.min(50, limit * 3) })
+      ? await db.searchPage(query.trim(), {
+          entityType: 'legal_case',
+          limit: Math.min(50, limit * 3),
+        })
       : null;
     if (!page) {
       const recent = await db.query('legal_case', {
@@ -956,10 +1534,16 @@ export class CaseService {
       return recent.rows.map((row) => ({
         value: String((row as EngineRow).id),
         label: `قضية ${(row as EngineRow).case_number} / ${(row as EngineRow).case_year}`,
-        ...((row as EngineRow).subject ? { description: String((row as EngineRow).subject) } : {}),
+        ...((row as EngineRow).subject
+          ? { description: String((row as EngineRow).subject) }
+          : {}),
       }));
     }
-    const options: Array<{ value: string; label: string; description?: string }> = [];
+    const options: Array<{
+      value: string;
+      label: string;
+      description?: string;
+    }> = [];
     for (const hit of page.hits) {
       const row = await db.get('legal_case', hit.entityId);
       if (!row) continue;
@@ -973,29 +1557,41 @@ export class CaseService {
     return options;
   }
 
+  async authorityOptions(
+    query: string,
+  ): Promise<Array<{ value: string; label: string }>> {
+    if (query.trim())
+      return (
+        await this.deps.db.searchPage(query, { entityType: 'court', limit: 20 })
+      ).hits.map((hit) => ({ value: hit.entityId, label: hit.title }));
+    return (
+      await this.deps.db.query('court', {
+        orderBy: [{ column: 'name', direction: 'asc' }],
+        limit: 20,
+      })
+    ).rows.map((c) => ({ value: String(c.id), label: String(c.name) }));
+  }
+
   async courts(): Promise<EngineRow[]> {
-    return (await this.deps.db.query('court', { orderBy: [{ column: 'name', direction: 'asc' }], limit: 500 })).rows as EngineRow[];
+    return (
+      await relatedRows(this.deps.db, 'court', {
+        orderBy: [{ column: 'name', direction: 'asc' }],
+      })
+    ).rows;
   }
 
   async circuits(courtId?: string): Promise<EngineRow[]> {
-    if (!courtId) return (await this.deps.db.query('court_circuit', { orderBy: [{ column: 'name', direction: 'asc' }], limit: 500 })).rows as EngineRow[];
-    return (await this.deps.db.query('court_circuit', { filters: [{ column: 'court_id', op: 'eq', value: courtId }], limit: 500 })).rows as EngineRow[];
+    if (!courtId)
+      return (
+        await relatedRows(this.deps.db, 'court_circuit', {
+          orderBy: [{ column: 'name', direction: 'asc' }],
+        })
+      ).rows;
+    return (
+      await relatedRows(this.deps.db, 'court_circuit', {
+        filters: [{ column: 'court_id', op: 'eq', value: courtId }],
+        orderBy: [{ column: 'name', direction: 'asc' }],
+      })
+    ).rows;
   }
-}
-
-function compareCases(a: EngineRow, b: EngineRow, sortKey: string | undefined, dir: 'asc' | 'desc' | undefined): number {
-  const factor = dir === 'asc' ? 1 : -1;
-  let column = 'registration_date';
-  if (sortKey === 'case_number') column = 'case_number';
-  else if (sortKey === 'case_year') column = 'case_year';
-  else if (sortKey === 'updated_at') column = 'updated_at';
-  else if (sortKey === 'subject') column = 'subject';
-  const av = String(a[column] ?? '');
-  const bv = String(b[column] ?? '');
-  // numeric compare for case_number/year
-  if (column === 'case_year' || column === 'case_number') {
-    const an = Number(av); const bn = Number(bv);
-    if (!Number.isNaN(an) && !Number.isNaN(bn) && av !== '' && bv !== '') return (an - bn) * factor;
-  }
-  return av.localeCompare(bv, 'ar') * factor;
 }
