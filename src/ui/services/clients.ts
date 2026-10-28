@@ -56,29 +56,30 @@ export class ClientService {
   }
 
   async list(request: TableRequest): Promise<TableResult<ClientRow>> {
-    const { db, lookups, cache } = this.deps;
+    const { db, lookups } = this.deps;
     const statusId = request.filters.status ? lookups.id('client_status', request.filters.status) : null;
-    if (request.search.trim()) {
-      const all = await collectPartySearch(db, request.search.trim());
-      const clientProfiles = new Map<string, EngineRow>();
-      for (const hit of all) {
-        const profile = await db.get('client_profile', hit.entityId);
-        if (profile) clientProfiles.set(hit.entityId, profile);
-      }
-      let ids = [...clientProfiles.keys()];
-      if (statusId) {
-        ids = ids.filter((id) => String(clientProfiles.get(id)?.status_id ?? '') === statusId);
-      }
-      const parties = await cache.many('party', ids);
-      let rows = ids
-        .map((id) => ({ party: parties.get(id), client: clientProfiles.get(id) }))
-        .filter((entry): entry is { party: EngineRow; client: EngineRow } => Boolean(entry.party && entry.client));
-      rows = sortClients(rows, request.sortKey, request.sortDir);
-      const total = rows.length;
+    const kind = normalizeKindFilter(request.filters.kind);
+    const search = request.search.trim();
+
+    if (search) {
+      const pairs = await this.searchPairs(search, statusId, kind);
+      const sorted = sortClients(pairs, request.sortKey, request.sortDir);
       const { offset, limit } = paginate(request.page, request.pageSize);
       return {
-        rows: await this.enrich(rows.slice(offset, offset + limit)),
-        total,
+        rows: await this.enrich(sorted.slice(offset, offset + limit)),
+        total: sorted.length,
+      };
+    }
+
+    // `kind` lives on the party row and name sorting needs it too, so those requests enumerate the
+    // client set in keyset pages (exact totals) instead of silently ignoring the filter/sort.
+    if (kind || request.sortKey === 'name') {
+      const pairs = await this.collectPairs(statusId, kind);
+      const sorted = sortClients(pairs, request.sortKey, request.sortDir);
+      const { offset, limit } = paginate(request.page, request.pageSize);
+      return {
+        rows: await this.enrich(sorted.slice(offset, offset + limit)),
+        total: sorted.length,
       };
     }
 
@@ -89,50 +90,108 @@ export class ClientService {
       orderBy: [{ column: sortKey, direction }],
       ...paginate(request.page, request.pageSize),
     });
-    const parties = await cache.many('party', page.rows.map((client) => String(client.party_id)));
+    const parties = await this.deps.cache.many('party', page.rows.map((client) => String(client.party_id)));
     const pairs = page.rows
       .map((client) => ({ client, party: parties.get(String(client.party_id)) }))
-      .filter((entry): entry is { client: EngineRow; party: EngineRow } => Boolean(entry.party));
+      .filter((entry): entry is { client: EngineRow; party: EngineRow } => Boolean(entry.party && entry.party.deleted_at === null));
     return { rows: await this.enrich(pairs), total: page.total };
   }
 
-  private async enrich(pairs: ReadonlyArray<{ party: EngineRow; client: EngineRow }>): Promise<ClientRow[]> {
+  /** Search hits resolved to (party, client) pairs, keeping the exact result count. */
+  private async searchPairs(
+    search: string,
+    statusId: string | null,
+    kind: 'person' | 'organization' | null,
+  ): Promise<Array<{ party: EngineRow; client: EngineRow }>> {
+    const hits = await collectPartySearch(this.deps.db, search);
+    const ids = [...new Set(hits.map((hit) => hit.entityId))];
+    if (ids.length === 0) return [];
+    return this.collectPairs(statusId, kind, ids);
+  }
+
+  /**
+   * Streams client profiles (keyset pages, never the whole table at once), resolves the owning
+   * parties in bulk and applies the status/kind filters in memory.
+   */
+  private async collectPairs(
+    statusId: string | null,
+    kind: 'person' | 'organization' | null,
+    ids?: readonly string[],
+  ): Promise<Array<{ party: EngineRow; client: EngineRow }>> {
     const { db, cache } = this.deps;
-    if (pairs.length === 0) return [];
-    const ids = pairs.map((pair) => String(pair.party.id));
-    const contactPage = await db.query('party_contact', {
-      filters: [{ column: 'party_id', op: 'in', value: ids }],
-      limit: Math.min(500, Math.max(10, ids.length * 4)),
-    });
-    const contactsByParty = new Map<string, EngineRow[]>();
-    for (const contact of contactPage.rows) {
-      if (contact.deleted_at !== null) continue;
-      const key = String(contact.party_id);
-      const list = contactsByParty.get(key) ?? [];
-      list.push(contact);
-      contactsByParty.set(key, list);
+    const allowed = ids ? new Set(ids) : null;
+    const profiles: EngineRow[] = [];
+    for await (const batch of db.iterate('client_profile', { pageSize: 500 })) {
+      for (const row of batch) {
+        if (row.deleted_at != null) continue;
+        if (allowed && !allowed.has(String(row.party_id))) continue;
+        if (statusId && String(row.status_id ?? '') !== statusId) continue;
+        profiles.push(row);
+      }
     }
-    const rows: ClientRow[] = [];
-    for (const pair of pairs) {
+    if (profiles.length === 0) return [];
+    const parties = await cache.many('party', profiles.map((profile) => String(profile.party_id)));
+    const pairs: Array<{ party: EngineRow; client: EngineRow }> = [];
+    for (const profile of profiles) {
+      const party = parties.get(String(profile.party_id));
+      if (!party || party.deleted_at !== null) continue;
+      if (kind && String(party.kind) !== kind) continue;
+      pairs.push({ party, client: profile });
+    }
+    if (ids) {
+      const order = new Map(ids.map((id, index) => [id, index]));
+      pairs.sort((left, right) => (order.get(String(left.party.id)) ?? 0) - (order.get(String(right.party.id)) ?? 0));
+    }
+    return pairs;
+  }
+
+  private async enrich(pairs: ReadonlyArray<{ party: EngineRow; client: EngineRow }>): Promise<ClientRow[]> {
+    if (pairs.length === 0) return [];
+    const { db, lookups } = this.deps;
+    const ids = pairs.map((pair) => String(pair.party.id));
+
+    // Two bulk reads replace the previous per-row queries (an N+1 that ran one contacts query and
+    // one case_file_party count per displayed client).
+    const contactsByParty = new Map<string, EngineRow[]>();
+    for await (const batch of db.iterate('party_contact', {
+      filters: [{ column: 'party_id', op: 'in', value: ids }],
+      pageSize: 500,
+    })) {
+      for (const contact of batch) {
+        if (contact.deleted_at !== null) continue;
+        const key = String(contact.party_id);
+        const list = contactsByParty.get(key) ?? [];
+        list.push(contact);
+        contactsByParty.set(key, list);
+      }
+    }
+
+    const filesByParty = new Map<string, number>();
+    for await (const batch of db.iterate('case_file_party', {
+      filters: [{ column: 'party_id', op: 'in', value: ids }],
+      pageSize: 500,
+    })) {
+      for (const link of batch) {
+        if (link.deleted_at !== null) continue;
+        const key = String(link.party_id);
+        filesByParty.set(key, (filesByParty.get(key) ?? 0) + 1);
+      }
+    }
+
+    return pairs.map((pair) => {
       const partyId = String(pair.party.id);
       const contacts = contactsByParty.get(partyId) ?? [];
-      const phoneContact = pickContact(contacts, ['mobile', 'phone', 'whatsapp'], this.deps.lookups);
-      const emailContact = pickContact(contacts, ['email'], this.deps.lookups);
-      const files = await db.query('case_file_party', {
-        filters: [{ column: 'party_id', op: 'eq', value: partyId }],
-        limit: 0,
-      });
-      rows.push({
+      const phoneContact = pickContact(contacts, ['mobile', 'phone', 'whatsapp'], lookups);
+      const emailContact = pickContact(contacts, ['email'], lookups);
+      return {
         party: pair.party,
         client: pair.client,
         phone: phoneContact ? String(phoneContact.value) : null,
         email: emailContact ? String(emailContact.value) : null,
-        filesCount: files.total,
+        filesCount: filesByParty.get(partyId) ?? 0,
         lastActivity: String(pair.party.updated_at ?? pair.party.created_at ?? ''),
-      });
-    }
-    void cache;
-    return rows;
+      };
+    });
   }
 
   async get(partyId: string): Promise<ClientDetail | null> {
@@ -201,114 +260,185 @@ export class ClientService {
     const { db } = this.deps;
     const statusId = input.statusCode ? this.deps.lookups.id('client_status', input.statusCode) : null;
     const sourceId = input.sourceCode ? this.deps.lookups.id('client_source', input.sourceCode) : null;
-    let created: { party: EngineRow; client: EngineRow | null } | null = null;
-    if (input.kind === 'person') {
-      if (input.nationalId?.trim()) {
-        const duplicate = await db.query('person', {
-          filters: [{ column: 'national_id', op: 'eq', value: input.nationalId.trim() }],
+    const nationalId = input.nationalId?.trim() ?? '';
+    const registryNo = input.commercialRegistryNo?.trim() ?? '';
+    const taxId = input.taxId?.trim() ?? '';
+
+    if (input.kind === 'person' && nationalId) {
+      const duplicate = await db.query('person', {
+        filters: [{ column: 'national_id', op: 'eq', value: nationalId }],
+        limit: 1,
+      });
+      await this.rejectDuplicate(duplicate.rows[0], 'national id already exists');
+    }
+    if (input.kind === 'organization') {
+      if (registryNo) {
+        const duplicate = await db.query('organization', {
+          filters: [{ column: 'commercial_registry_no', op: 'eq', value: registryNo }],
           limit: 1,
         });
-        const existing = duplicate.rows[0];
-        if (existing) {
-          const party = await db.get('party', String(existing.party_id));
-          if (party) {
-            throw new ConflictError('national id already exists', 'ALREADY_EXISTS', {
-              partyId: party.id,
-              displayName: party.display_name,
-            });
-          }
-        }
+        await this.rejectDuplicate(duplicate.rows[0], 'commercial registry already exists');
       }
-      const result = (await db.createPerson(
-        {
-          firstName: input.firstName?.trim() ?? '',
-          ...(input.middleName?.trim() ? { middleName: input.middleName.trim() } : {}),
-          lastName: input.lastName?.trim() ?? '',
-          ...(input.nationalId?.trim() ? { nationalId: input.nationalId.trim() } : {}),
-          ...(input.birthDate ? { birthDate: input.birthDate } : {}),
-          ...(input.gender ? { gender: input.gender } : {}),
-          ...(input.occupation?.trim() ? { occupation: input.occupation.trim() } : {}),
-          ...(input.notes?.trim() ? { notes: input.notes.trim() } : {}),
-        },
-        { client: true },
-      )) as unknown as { party: EngineRow; client: EngineRow | null };
-      created = result;
-    } else {
-      const result = (await db.createOrganization(
-        {
-          legalName: input.legalName?.trim() ?? '',
-          ...(input.tradeName?.trim() ? { tradeName: input.tradeName.trim() } : {}),
-          ...(input.legalFormCode ? { legalFormCode: input.legalFormCode } : {}),
-          ...(input.commercialRegistryNo?.trim() ? { commercialRegistryNo: input.commercialRegistryNo.trim() } : {}),
-          ...(input.taxId?.trim() ? { taxId: input.taxId.trim() } : {}),
-          ...(input.notes?.trim() ? { notes: input.notes.trim() } : {}),
-        },
-        { client: true },
-      )) as unknown as { party: EngineRow; client: EngineRow | null };
-      created = result;
+      if (taxId) {
+        const duplicate = await db.query('organization', {
+          filters: [{ column: 'tax_id', op: 'eq', value: taxId }],
+          limit: 1,
+        });
+        await this.rejectDuplicate(duplicate.rows[0], 'tax id already exists');
+      }
     }
-    if (!created) throw new ValidationError('client was not created');
-    if (statusId || sourceId) {
-      await db.update('client_profile', String(created.party.id), {
-        ...(statusId ? { status_id: statusId } : {}),
-        ...(sourceId ? { source_id: sourceId } : {}),
+
+    // One transaction: the party, its role row, the client profile, the status/source patch and
+    // the contacts are committed together or not at all (no half-created clients).
+    const created = await db.transaction(async () => {
+      let result: { party: EngineRow; client: EngineRow | null } | null = null;
+      if (input.kind === 'person') {
+        result = (await db.createPerson(
+          {
+            firstName: input.firstName?.trim() ?? '',
+            ...(input.middleName?.trim() ? { middleName: input.middleName.trim() } : {}),
+            lastName: input.lastName?.trim() ?? '',
+            ...(nationalId ? { nationalId } : {}),
+            ...(input.birthDate ? { birthDate: input.birthDate } : {}),
+            ...(input.gender ? { gender: input.gender } : {}),
+            ...(input.occupation?.trim() ? { occupation: input.occupation.trim() } : {}),
+            ...(input.notes?.trim() ? { notes: input.notes.trim() } : {}),
+          },
+          { client: true },
+        )) as unknown as { party: EngineRow; client: EngineRow | null };
+      } else {
+        result = (await db.createOrganization(
+          {
+            legalName: input.legalName?.trim() ?? '',
+            ...(input.tradeName?.trim() ? { tradeName: input.tradeName.trim() } : {}),
+            ...(input.legalFormCode ? { legalFormCode: input.legalFormCode } : {}),
+            ...(registryNo ? { commercialRegistryNo: registryNo } : {}),
+            ...(taxId ? { taxId } : {}),
+            ...(input.notes?.trim() ? { notes: input.notes.trim() } : {}),
+          },
+          { client: true },
+        )) as unknown as { party: EngineRow; client: EngineRow | null };
+      }
+      if (!result) throw new ValidationError('client was not created');
+      if (statusId || sourceId) {
+        await db.update('client_profile', String(result.party.id), {
+          ...(statusId ? { status_id: statusId } : {}),
+          ...(sourceId ? { source_id: sourceId } : {}),
+        });
+      }
+      if (input.phone?.trim()) {
+        await db.addContact(String(result.party.id), { typeCode: 'mobile', value: input.phone.trim(), isPrimary: true });
+      }
+      if (input.email?.trim()) {
+        await db.addContact(String(result.party.id), { typeCode: 'email', value: input.email.trim(), isPrimary: false });
+      }
+      return result;
+    }, ['party', 'person', 'organization', 'client_profile', 'party_contact']);
+
+    this.deps.cache.invalidate();
+    return created.party;
+  }
+
+  private async rejectDuplicate(row: EngineRow | undefined, message: string): Promise<void> {
+    if (!row || row.deleted_at !== null) return;
+    const partyId = String(row.party_id ?? row.id ?? '');
+    const party = partyId ? await this.deps.db.get('party', partyId) : undefined;
+    if (party && party.deleted_at === null) {
+      throw new ConflictError(message, 'ALREADY_EXISTS', {
+        partyId: party.id,
+        displayName: party.display_name,
       });
     }
-    if (input.phone?.trim()) {
-      await db.addContact(String(created.party.id), { typeCode: 'mobile', value: input.phone.trim(), isPrimary: true });
-    }
-    if (input.email?.trim()) {
-      await db.addContact(String(created.party.id), { typeCode: 'email', value: input.email.trim(), isPrimary: false });
-    }
-    return created.party;
   }
 
   async update(detail: ClientDetail, input: ClientInput & { displayName?: string }): Promise<void> {
     const { db } = this.deps;
     const partyId = String(detail.party.id);
-    const partyPatch: Record<string, unknown> = {};
-    if (input.displayName?.trim()) partyPatch.display_name = input.displayName.trim();
-    if (input.notes !== undefined) partyPatch.notes = input.notes.trim() || null;
-    if (Object.keys(partyPatch).length > 0) await db.update('party', partyId, partyPatch);
-
-    if (input.kind === 'person') {
-      const personPatch: Record<string, unknown> = {
-        first_name: input.firstName?.trim() || detail.person?.first_name || '',
-        middle_name: input.middleName?.trim() || null,
-        last_name: input.lastName?.trim() || detail.person?.last_name || '',
-        national_id: input.nationalId?.trim() || null,
-        birth_date: input.birthDate || null,
-        gender: input.gender ?? 'unknown',
-        occupation: input.occupation?.trim() || null,
-      };
-      await db.update('person', partyId, personPatch);
-      if (!input.displayName?.trim()) {
-        const display = [input.firstName, input.middleName, input.lastName].filter(Boolean).join(' ').trim();
-        if (display) await db.update('party', partyId, { display_name: display });
-      }
-    } else {
-      await db.update('organization', partyId, {
-        legal_name: input.legalName?.trim() || detail.organization?.legal_name || '',
-        trade_name: input.tradeName?.trim() || null,
-        legal_form_id: this.deps.lookups.id('legal_form', input.legalFormCode ?? null),
-        commercial_registry_no: input.commercialRegistryNo?.trim() || null,
-        tax_id: input.taxId?.trim() || null,
-        notes: input.notes?.trim() || null,
-      });
-      if (!input.displayName?.trim()) {
-        const display = input.tradeName?.trim() || input.legalName?.trim();
-        if (display) await db.update('party', partyId, { display_name: display });
-      }
-    }
-
     const statusId = input.statusCode ? this.deps.lookups.id('client_status', input.statusCode) : null;
     const sourceId = input.sourceCode ? this.deps.lookups.id('client_source', input.sourceCode) : null;
-    await db.update('client_profile', partyId, {
-      ...(statusId ? { status_id: statusId } : {}),
-      ...(sourceId ? { source_id: sourceId } : {}),
-      ...(input.notes !== undefined ? { notes: input.notes.trim() || null } : {}),
-    });
+
+    await db.transaction(async () => {
+      const partyPatch: Record<string, unknown> = {};
+      if (input.displayName?.trim()) partyPatch.display_name = input.displayName.trim();
+      if (input.notes !== undefined) partyPatch.notes = input.notes.trim() || null;
+      if (Object.keys(partyPatch).length > 0) await db.update('party', partyId, partyPatch);
+
+      if (input.kind === 'person') {
+        const personPatch: Record<string, unknown> = {
+          first_name: input.firstName?.trim() || detail.person?.first_name || '',
+          middle_name: input.middleName?.trim() || null,
+          last_name: input.lastName?.trim() || detail.person?.last_name || '',
+          national_id: input.nationalId?.trim() || null,
+          birth_date: input.birthDate || null,
+          gender: input.gender ?? 'unknown',
+          occupation: input.occupation?.trim() || null,
+        };
+        await db.update('person', partyId, personPatch);
+        if (!input.displayName?.trim()) {
+          const display = [input.firstName, input.middleName, input.lastName].filter(Boolean).join(' ').trim();
+          if (display) await db.update('party', partyId, { display_name: display });
+        }
+      } else {
+        await db.update('organization', partyId, {
+          legal_name: input.legalName?.trim() || detail.organization?.legal_name || '',
+          trade_name: input.tradeName?.trim() || null,
+          legal_form_id: this.deps.lookups.id('legal_form', input.legalFormCode ?? null),
+          commercial_registry_no: input.commercialRegistryNo?.trim() || null,
+          tax_id: input.taxId?.trim() || null,
+          notes: input.notes?.trim() || null,
+        });
+        if (!input.displayName?.trim()) {
+          const display = input.tradeName?.trim() || input.legalName?.trim();
+          if (display) await db.update('party', partyId, { display_name: display });
+        }
+      }
+
+      await db.update('client_profile', partyId, {
+        ...(statusId ? { status_id: statusId } : {}),
+        ...(sourceId ? { source_id: sourceId } : {}),
+        ...(input.notes !== undefined ? { notes: input.notes.trim() || null } : {}),
+      });
+
+      // Contact rows are the single source of truth for phone/email; previously edits were
+      // dropped here, so the list kept showing the old number after "saving".
+      if (input.phone !== undefined) {
+        await this.upsertContact(partyId, ['mobile', 'phone', 'whatsapp'], input.phone, 'mobile');
+      }
+      if (input.email !== undefined) {
+        await this.upsertContact(partyId, ['email'], input.email, 'email');
+      }
+    }, ['party', 'person', 'organization', 'client_profile', 'party_contact']);
+
     this.deps.cache.invalidate();
+  }
+
+  /** Updates the primary contact of the given kinds, creates it when missing, removes it when blank. */
+  private async upsertContact(
+    partyId: string,
+    typeCodes: readonly string[],
+    rawValue: string,
+    createTypeCode: string,
+  ): Promise<void> {
+    const { db, lookups } = this.deps;
+    const value = rawValue.trim();
+    const wantedTypeIds = new Set(typeCodes.map((code) => lookups.id('contact_type', code)).filter(Boolean));
+    const existing = await db.query('party_contact', {
+      filters: [{ column: 'party_id', op: 'eq', value: partyId }],
+      limit: 200,
+    });
+    const active = existing.rows.filter((row) => row.deleted_at === null);
+    const matches = active.filter((row) => wantedTypeIds.has(String(row.contact_type_id)));
+    matches.sort((left, right) => Number(right.is_primary ?? 0) - Number(left.is_primary ?? 0));
+    if (!value) {
+      for (const row of matches) await db.softDelete('party_contact', String(row.id), 'إزالة وسيلة اتصال');
+      return;
+    }
+    const current = matches[0];
+    if (current) {
+      if (String(current.value) !== value) await db.update('party_contact', String(current.id), { value });
+      return;
+    }
+    await db.addContact(partyId, { typeCode: createTypeCode, value, isPrimary: true });
   }
 
   async addContact(partyId: string, typeCode: string, value: string, isPrimary = false): Promise<EngineRow> {
@@ -420,27 +550,27 @@ function pickContact(contacts: readonly EngineRow[], typeCodes: readonly string[
   return matching[0] ?? null;
 }
 
+function normalizeKindFilter(value: string | undefined): 'person' | 'organization' | null {
+  if (value === 'person' || value === 'organization') return value;
+  return null;
+}
+
 function sortClients(
   rows: Array<{ party: EngineRow; client: EngineRow }>,
   sortKey: string | undefined,
   sortDir: 'asc' | 'desc' | undefined,
 ): Array<{ party: EngineRow; client: EngineRow }> {
-  const direction = sortDir === 'asc' ? 1 : -1;
-  return [...rows].sort((left, right) => {
-    let a: string;
-    let b: string;
-    if (sortKey === 'client_code') {
-      a = String(left.client.client_code);
-      b = String(right.client.client_code);
-    } else if (sortKey === 'name') {
-      a = String(left.party.display_name);
-      b = String(right.party.display_name);
-    } else {
-      a = String(left.client.client_since ?? '');
-      b = String(right.client.client_since ?? '');
-    }
-    return a.localeCompare(b, 'ar') * direction;
-  });
+  const key = sortKey ?? 'lastActivity';
+  // Codes and names read naturally in ascending order; recency reads naturally descending.
+  const direction = sortDir === 'asc' ? 1 : sortDir === 'desc' ? -1 : key === 'lastActivity' || key === 'last' ? -1 : 1;
+  const collator = new Intl.Collator('ar', { numeric: true, sensitivity: 'base' });
+  const valueOf = (row: { party: EngineRow; client: EngineRow }): string => {
+    if (key === 'client_code' || key === 'code') return String(row.client.client_code ?? '');
+    if (key === 'name') return String(row.party.display_name ?? '');
+    if (key === 'files') return String(row.client.client_since ?? '');
+    return String(row.party.updated_at ?? row.client.client_since ?? row.party.created_at ?? '');
+  };
+  return [...rows].sort((left, right) => collator.compare(valueOf(left), valueOf(right)) * direction);
 }
 
 /** Collects search hits across pages so client search keeps an exact total. */

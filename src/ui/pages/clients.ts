@@ -113,7 +113,7 @@ export async function renderClients(context: PageArgs): Promise<HTMLElement> {
       h('button', {
         class: 'btn btn--primary',
         type: 'button',
-        on: { click: () => openClientForm(context) },
+        on: { click: () => openClientForm(context, undefined, () => table.reload()) },
       }, icon('plus', 17), h('span', { text: 'عميل جديد' })),
     ],
   });
@@ -143,13 +143,20 @@ export async function renderClients(context: PageArgs): Promise<HTMLElement> {
           type: 'button',
           title: 'تعديل',
           attrs: { 'aria-label': 'تعديل بيانات العميل' },
-          on: { click: () => openClientForm(context) },
+          // The edit dialog needs the loaded record; opening it without one produced a blank form.
+          on: {
+            click: async () => {
+              const detail = await services.clients.get(String(row.party.id));
+              if (!detail) return;
+              openClientForm(context, detail, () => table.reload());
+            },
+          },
         }, icon('edit', 16)),
       ],
       emptyTitle: 'لا يوجد عملاء بعد',
       emptyText: 'سجّل أول عميل لتبدأ ملفاته وقضاياه. بيانات العميل محفوظة على هذا الجهاز فقط.',
       emptyIcon: 'users',
-      emptyActions: [h('button', { class: 'btn btn--primary btn--sm', type: 'button', text: 'إضافة عميل', on: { click: () => openClientForm(context) } })],
+      emptyActions: [h('button', { class: 'btn btn--primary btn--sm', type: 'button', text: 'إضافة عميل', on: { click: () => openClientForm(context, undefined, () => table.reload()) } })],
     },
     workspace.preferences,
   );
@@ -169,7 +176,7 @@ export function openClientForm(context: PageArgs, existing?: ClientDetail, onSav
 
   const personFields = h(
     'div',
-    { class: 'stack', style: 'gap:16px' },
+    { class: 'stack', style: 'gap:16px', hidden: kind === 'organization' ? 'hidden' : undefined },
     h(
       'div',
       { class: 'form-grid' },
@@ -480,7 +487,12 @@ export async function renderClientDetail(context: PageArgs): Promise<HTMLElement
             h(
               'div',
               null,
-              h('p', { class: 'text-sm', text: [address.line1, address.line2].filter(Boolean).join(' — ') }),
+              h('p', {
+                class: 'text-sm',
+                text: [address.street, address.building_no ? `مبنى ${String(address.building_no)}` : '', address.floor ? `دور ${String(address.floor)}` : '', address.apartment ? `شقة ${String(address.apartment)}` : '', address.district]
+                  .filter(Boolean)
+                  .join(' — ') || '—',
+              }),
               h('p', { class: 'text-xs text-3', text: [address.city, lookups.byId(String(address.governorate_id ?? ''))?.nameAr].filter(Boolean).join(' · ') }),
             ),
           ),
